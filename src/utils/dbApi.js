@@ -90,6 +90,8 @@ export async function dbSaveSettings(settings) {
 export async function dbClearAll() {
   const res = await fetch(`${API_BASE}/clear`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true }),
   });
   if (!res.ok) throw new Error('Failed to clear database');
   return res.json();

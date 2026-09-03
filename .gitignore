@@ -62,8 +62,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
-*~
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
+# Scratch & Notes
+notes.txt
+Test.txt
+
