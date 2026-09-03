@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.yarn/
+
+# Production & Build Output
+dist/
+dist-ssr/
+build/
+out/
+
+# SQLite Database Files (server/better-sqlite3)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+
+# Logs & Coverage
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+coverage/
+.nyc_output/
+
+# Caches & Tooling Outputs
+.cache/
+.vite/
+.eslintcache
+.stylelintcache
+.vercel/
+.turbo/
+.temp/
+*.tmp
+
+# System & Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE & Text Editor Settings
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+*.suo
+*.ntvs*
+*.njsproj
+*.sln

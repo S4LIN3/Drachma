@@ -1,0 +1,19 @@
+{
+  "name": "Expense Tracker",
+  "short_name": "ExpenseTracker",
+  "description": "Quick Daily Meal & Expense Tracker",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0F1012",
+  "theme_color": "#15803D",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "productivity", "utilities"]
+}
