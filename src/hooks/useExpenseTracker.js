@@ -53,7 +53,7 @@ export const useExpenseTracker = (addToast) => {
     }
   }, []);
 
-  // Initial load from SQLite Database + Real-time Sync Subscription
+  // Initial load from SQLite Database + Real-time Sync Subscription & PWA Auto-Refresh
   useEffect(() => {
     let isMounted = true;
 
@@ -64,15 +64,34 @@ export const useExpenseTracker = (addToast) => {
 
     init();
 
-    // Subscribe to Real-Time SSE Server updates (syncs mobile PWA and all web tabs instantly)
-    const unsubscribe = subscribeToDbSync((event) => {
-      // Whenever another client (e.g. mobile PWA or web dashboard) commits a change, reload fresh data
+    // Subscribe to Real-Time SSE Server updates and BroadcastChannel
+    const unsubscribe = subscribeToDbSync(() => {
       reloadFromDb();
     });
+
+    // Auto re-fetch when PWA/app comes to foreground or tab gains focus
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        reloadFromDb();
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    // Periodic polling fallback (every 8 seconds when app is active)
+    const pollInterval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        reloadFromDb();
+      }
+    }, 8000);
 
     return () => {
       isMounted = false;
       unsubscribe();
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      clearInterval(pollInterval);
     };
   }, [reloadFromDb]);
 

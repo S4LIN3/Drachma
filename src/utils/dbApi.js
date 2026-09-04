@@ -1,12 +1,27 @@
 /**
- * Frontend Database Client with Real-Time Server-Sent Events (SSE) Synchronization
- * Communicates with the persistent SQLite Database on the backend.
+ * Frontend Database Client with Real-Time BroadcastChannel and SSE Synchronization
+ * Communicates with the persistent Database on the backend.
  */
 
 const API_BASE = '/api';
 
+// Cross-tab / PWA BroadcastChannel for instant local device synchronization
+const syncChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
+  ? new BroadcastChannel('drachma_pwa_sync')
+  : null;
+
+function notifyLocalSync(eventType, payload) {
+  if (syncChannel) {
+    try {
+      syncChannel.postMessage({ type: eventType, payload, timestamp: Date.now() });
+    } catch (err) {
+      // Ignore broadcast errors
+    }
+  }
+}
+
 export async function fetchDbData() {
-  const res = await fetch(`${API_BASE}/data`);
+  const res = await fetch(`${API_BASE}/data`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to fetch database data: ${res.statusText}`);
   const json = await res.json();
   return json.data;
@@ -19,7 +34,9 @@ export async function dbToggleMeal(date, recurringItemId) {
     body: JSON.stringify({ date, recurringItemId }),
   });
   if (!res.ok) throw new Error('Failed to toggle meal in database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('MEAL_TOGGLED', { date, recurringItemId });
+  return data;
 }
 
 export async function dbSaveMealNotes(date, notes) {
@@ -29,7 +46,9 @@ export async function dbSaveMealNotes(date, notes) {
     body: JSON.stringify({ date, notes }),
   });
   if (!res.ok) throw new Error('Failed to save notes in database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('NOTES_UPDATED', { date, notes });
+  return data;
 }
 
 export async function dbSaveExpense(expenseData) {
@@ -40,6 +59,7 @@ export async function dbSaveExpense(expenseData) {
   });
   if (!res.ok) throw new Error('Failed to save expense in database');
   const json = await res.json();
+  notifyLocalSync('EXPENSE_SAVED', json.data);
   return json.data;
 }
 
@@ -48,7 +68,9 @@ export async function dbDeleteExpense(id) {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to delete expense in database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('EXPENSE_DELETED', { id });
+  return data;
 }
 
 export async function dbSaveRecurringItem(itemData) {
@@ -58,7 +80,9 @@ export async function dbSaveRecurringItem(itemData) {
     body: JSON.stringify(itemData),
   });
   if (!res.ok) throw new Error('Failed to save recurring item in database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('RECURRING_SAVED', data);
+  return data;
 }
 
 export async function dbToggleRecurringActive(id) {
@@ -66,7 +90,9 @@ export async function dbToggleRecurringActive(id) {
     method: 'PATCH',
   });
   if (!res.ok) throw new Error('Failed to toggle recurring item in database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('RECURRING_TOGGLED', { id });
+  return data;
 }
 
 export async function dbDeleteRecurringItem(id) {
@@ -74,7 +100,9 @@ export async function dbDeleteRecurringItem(id) {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to delete recurring item in database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('RECURRING_DELETED', { id });
+  return data;
 }
 
 export async function dbSaveSettings(settings) {
@@ -84,7 +112,9 @@ export async function dbSaveSettings(settings) {
     body: JSON.stringify(settings),
   });
   if (!res.ok) throw new Error('Failed to save settings in database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('SETTINGS_UPDATED', settings);
+  return data;
 }
 
 export async function dbClearAll() {
@@ -94,15 +124,29 @@ export async function dbClearAll() {
     body: JSON.stringify({ confirm: true }),
   });
   if (!res.ok) throw new Error('Failed to clear database');
-  return res.json();
+  const data = await res.json();
+  notifyLocalSync('DATA_CLEARED', {});
+  return data;
 }
 
 /**
- * Initializes a real-time SSE listener for instant multi-device / PWA sync.
+ * Initializes a real-time BroadcastChannel and SSE listener for multi-device / PWA sync.
  */
 export function subscribeToDbSync(onUpdateCallback) {
   let eventSource = null;
 
+  // 1. BroadcastChannel Listener (Instant local tab/PWA synchronization)
+  const handleBroadcastMessage = (event) => {
+    if (onUpdateCallback && event.data) {
+      onUpdateCallback(event.data);
+    }
+  };
+
+  if (syncChannel) {
+    syncChannel.addEventListener('message', handleBroadcastMessage);
+  }
+
+  // 2. SSE Listener (For long-lived server connection if supported)
   try {
     eventSource = new EventSource(`${API_BASE}/sync/events`);
 
@@ -117,14 +161,17 @@ export function subscribeToDbSync(onUpdateCallback) {
       }
     };
 
-    eventSource.onerror = (err) => {
-      // EventSource automatically retries on connection error
+    eventSource.onerror = () => {
+      // EventSource auto-retries
     };
   } catch (err) {
     console.warn('SSE Sync not available in this environment:', err);
   }
 
   return () => {
+    if (syncChannel) {
+      syncChannel.removeEventListener('message', handleBroadcastMessage);
+    }
     if (eventSource) {
       eventSource.close();
     }
