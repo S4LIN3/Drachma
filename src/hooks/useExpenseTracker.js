@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { loadStoredData, saveStoredData, clearAllData, exportDataAsJSON } from '../utils/storage';
 import { getCurrentMonthKey, getAdjacentMonthKey, getTodayDateStr } from '../utils/dateHelpers';
 import { calculateMonthlyTotals, calculateDailyTotals } from '../utils/calculations';
-import { getSampleInitialData } from '../constants/sampleData';
 import { 
   fetchDbData, 
   dbToggleMeal, 
@@ -460,26 +459,6 @@ export const useExpenseTracker = (addToast) => {
     }
   }, [addToast, reloadFromDb]);
 
-  const resetToSampleData = useCallback(async () => {
-    try {
-      const sample = getSampleInitialData();
-      await dbClearAll();
-
-      for (const item of sample.recurringItems) {
-        await dbSaveRecurringItem(item);
-      }
-      for (const exp of sample.expenses) {
-        await dbSaveExpense(exp);
-      }
-      await dbSaveSettings(sample.settings);
-
-      await reloadFromDb();
-      if (addToast) addToast('Loaded sample dataset into database', 'success');
-    } catch (err) {
-      console.error('Reset to sample data error:', err);
-    }
-  }, [addToast, reloadFromDb]);
-
   const clearData = useCallback(async () => {
     try {
       await dbClearAll();
@@ -520,7 +499,6 @@ export const useExpenseTracker = (addToast) => {
     updateSettings,
     exportData,
     importData,
-    resetToSampleData,
     clearData,
   };
 };

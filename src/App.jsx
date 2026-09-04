@@ -46,7 +46,6 @@ export function App() {
     updateSettings,
     exportData,
     importData,
-    resetToSampleData,
     clearData,
   } = useExpenseTracker(addToast);
 
@@ -404,7 +403,6 @@ export function App() {
         onExportPDF={handleExportPDF}
         onExportJSON={exportData}
         onImportData={importData}
-        onResetSampleData={resetToSampleData}
         onRequestClearAll={handleClearAllRequest}
         onClose={() => setIsSettingsOpen(false)}
       />

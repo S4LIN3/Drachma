@@ -1,5 +1,3 @@
-import { getSampleInitialData } from '../constants/sampleData';
-
 const STORAGE_KEYS = {
   RECURRING_ITEMS: 'expense_tracker_recurring_items_v2',
   MEAL_TRACKER: 'expense_tracker_meal_records_v2',
@@ -59,8 +57,12 @@ export const loadStoredData = () => {
     const isInitialized = localStorage.getItem(STORAGE_KEYS.INITIALIZED_FLAG);
     
     if (!isInitialized) {
-      // First time loading - load rich initial dataset
-      const initial = getSampleInitialData();
+      const initial = {
+        recurringItems: DEFAULT_RECURRING_ITEMS,
+        mealTracker: [],
+        expenses: [],
+        settings: { theme: 'light', currency: 'INR', notificationsEnabled: true },
+      };
       saveStoredData(initial.recurringItems, initial.mealTracker, initial.expenses, initial.settings);
       localStorage.setItem(STORAGE_KEYS.INITIALIZED_FLAG, 'true');
       return initial;

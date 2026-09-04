@@ -1,9 +1,19 @@
 /**
- * Frontend Database Client with Real-Time BroadcastChannel and SSE Synchronization
+ * Frontend Database Client with Security Headers, BroadcastChannel and SSE Synchronization
  * Communicates with the persistent Database on the backend.
  */
 
 const API_BASE = '/api';
+const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || '';
+const ADMIN_SECRET = import.meta.env.VITE_ADMIN_SECRET || '';
+
+function getAuthHeaders(customHeaders = {}) {
+  const headers = { ...customHeaders };
+  if (API_SECRET_KEY) {
+    headers['X-Api-Key'] = API_SECRET_KEY;
+  }
+  return headers;
+}
 
 // Cross-tab / PWA BroadcastChannel for instant local device synchronization
 const syncChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
@@ -21,7 +31,10 @@ function notifyLocalSync(eventType, payload) {
 }
 
 export async function fetchDbData() {
-  const res = await fetch(`${API_BASE}/data`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/data`, { 
+    headers: getAuthHeaders(),
+    cache: 'no-store' 
+  });
   if (!res.ok) throw new Error(`Failed to fetch database data: ${res.statusText}`);
   const json = await res.json();
   return json.data;
@@ -30,7 +43,7 @@ export async function fetchDbData() {
 export async function dbToggleMeal(date, recurringItemId) {
   const res = await fetch(`${API_BASE}/meals/toggle`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ date, recurringItemId }),
   });
   if (!res.ok) throw new Error('Failed to toggle meal in database');
@@ -42,7 +55,7 @@ export async function dbToggleMeal(date, recurringItemId) {
 export async function dbSaveMealNotes(date, notes) {
   const res = await fetch(`${API_BASE}/meals/notes`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ date, notes }),
   });
   if (!res.ok) throw new Error('Failed to save notes in database');
@@ -54,7 +67,7 @@ export async function dbSaveMealNotes(date, notes) {
 export async function dbSaveExpense(expenseData) {
   const res = await fetch(`${API_BASE}/expenses`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(expenseData),
   });
   if (!res.ok) throw new Error('Failed to save expense in database');
@@ -66,6 +79,7 @@ export async function dbSaveExpense(expenseData) {
 export async function dbDeleteExpense(id) {
   const res = await fetch(`${API_BASE}/expenses/${id}`, {
     method: 'DELETE',
+    headers: getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to delete expense in database');
   const data = await res.json();
@@ -76,7 +90,7 @@ export async function dbDeleteExpense(id) {
 export async function dbSaveRecurringItem(itemData) {
   const res = await fetch(`${API_BASE}/recurring`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(itemData),
   });
   if (!res.ok) throw new Error('Failed to save recurring item in database');
@@ -88,6 +102,7 @@ export async function dbSaveRecurringItem(itemData) {
 export async function dbToggleRecurringActive(id) {
   const res = await fetch(`${API_BASE}/recurring/${id}/toggle`, {
     method: 'PATCH',
+    headers: getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to toggle recurring item in database');
   const data = await res.json();
@@ -98,6 +113,7 @@ export async function dbToggleRecurringActive(id) {
 export async function dbDeleteRecurringItem(id) {
   const res = await fetch(`${API_BASE}/recurring/${id}`, {
     method: 'DELETE',
+    headers: getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to delete recurring item in database');
   const data = await res.json();
@@ -108,7 +124,7 @@ export async function dbDeleteRecurringItem(id) {
 export async function dbSaveSettings(settings) {
   const res = await fetch(`${API_BASE}/settings`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(settings),
   });
   if (!res.ok) throw new Error('Failed to save settings in database');
@@ -118,9 +134,14 @@ export async function dbSaveSettings(settings) {
 }
 
 export async function dbClearAll() {
+  const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
+  if (ADMIN_SECRET) {
+    headers['X-Admin-Secret'] = ADMIN_SECRET;
+  }
+
   const res = await fetch(`${API_BASE}/clear`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ confirm: true }),
   });
   if (!res.ok) throw new Error('Failed to clear database');

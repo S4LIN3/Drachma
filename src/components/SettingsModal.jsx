@@ -9,7 +9,6 @@ import {
   Monitor, 
   Upload, 
   Trash2, 
-  RefreshCw, 
   FileSpreadsheet, 
   FileText,
   Database,
@@ -24,7 +23,6 @@ export const SettingsModal = ({
   onExportPDF,
   onExportJSON,
   onImportData,
-  onResetSampleData,
   onRequestClearAll,
   onClose,
 }) => {
@@ -229,23 +227,6 @@ export const SettingsModal = ({
                   </div>
                 </div>
               )}
-
-              <div className="p-3 rounded-lg border border-neutral-200 dark:border-neutral-700 flex items-center justify-between gap-2">
-                <div>
-                  <h4 className="font-semibold text-neutral-900 dark:text-white">Load Demo Dataset</h4>
-                  <p className="text-[11px] text-neutral-400">Populate realistic test records.</p>
-                </div>
-                <button
-                  onClick={() => {
-                    onResetSampleData();
-                    onClose();
-                  }}
-                  className="px-3 py-1.5 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 text-neutral-800 dark:text-neutral-200 rounded-lg font-medium border border-neutral-300 dark:border-neutral-600 flex items-center gap-1"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Load</span>
-                </button>
-              </div>
 
               <div className="p-3 rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50/20 flex items-center justify-between gap-2">
                 <div>

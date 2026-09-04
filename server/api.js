@@ -14,7 +14,7 @@ function broadcastEvent(eventType, payload) {
   }
 }
 
-// Standardized HTTP Helper with Security Headers
+// Standardized HTTP Helper with Bank-Grade Security Headers
 function sendJson(res, statusCode, data) {
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json');
@@ -22,16 +22,39 @@ function sendJson(res, statusCode, data) {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none';");
   res.end(JSON.stringify(data));
 }
 
-// In-Memory Rate Limiter (120 requests/min per IP)
+// CORS Origin Handling
+function applyCorsHeaders(req, res) {
+  const origin = req.headers['origin'];
+  const allowedOrigin = process.env.ALLOWED_ORIGIN;
+
+  if (allowedOrigin) {
+    if (origin === allowedOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+    }
+  } else if (origin) {
+    // In default development mode, mirror request origin securely
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, X-Admin-Secret');
+  res.setHeader('Access-Control-Max-Age', '86400');
+}
+
+// Dual-Tier In-Memory Rate Limiter (Reads: 100/min, Writes: 30/min per IP)
 const rateLimitMap = new Map();
-function checkRateLimit(req) {
-  const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1';
+
+function checkRateLimit(req, isWriteOperation = false) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '127.0.0.1';
   const now = Date.now();
-  const windowMs = 60 * 1000;
-  const maxRequests = 120;
+  const windowMs = 60 * 1000; // 1 minute
+  const maxRequests = isWriteOperation ? 35 : 120;
 
   const record = rateLimitMap.get(ip) || { count: 0, resetAt: now + windowMs };
   if (now > record.resetAt) {
@@ -42,7 +65,7 @@ function checkRateLimit(req) {
   }
   rateLimitMap.set(ip, record);
 
-  // Clean up stale rate limit entries periodically
+  // Clean stale rate limit memory
   if (rateLimitMap.size > 5000) {
     for (const [key, val] of rateLimitMap.entries()) {
       if (now > val.resetAt) rateLimitMap.delete(key);
@@ -52,7 +75,16 @@ function checkRateLimit(req) {
   return record.count > maxRequests;
 }
 
-// Secure JSON Parser with 100KB Body Size Cap
+// Secure API Secret Verification (Optional Auth)
+function authenticateRequest(req) {
+  const secretKey = process.env.API_SECRET_KEY;
+  if (!secretKey) return true; // If no key set in env, pass through
+
+  const apiKeyHeader = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '');
+  return apiKeyHeader === secretKey;
+}
+
+// Body Size Limiter & JSON Parsing (100KB Cap)
 async function parseJsonBody(req, res) {
   if (req.body && typeof req.body === 'object') {
     return req.body;
@@ -61,7 +93,7 @@ async function parseJsonBody(req, res) {
   return new Promise((resolve, reject) => {
     let raw = '';
     let bytesRead = 0;
-    const MAX_BYTES = 100 * 1024; // 100 KB limit
+    const MAX_BYTES = 100 * 1024; // 100 KB max limit
 
     req.on('data', (chunk) => {
       bytesRead += chunk.length;
@@ -84,10 +116,13 @@ async function parseJsonBody(req, res) {
   });
 }
 
-// Input Validation Helpers
-function sanitizeString(str, maxLength = 500) {
+// Input Sanitization & Anti-XSS Helper
+function sanitizeInput(str, maxLength = 500) {
   if (typeof str !== 'string') return '';
-  return str.trim().slice(0, maxLength);
+  return str
+    .trim()
+    .replace(/[<>]/g, '') // Strip potentially dangerous HTML tags
+    .slice(0, maxLength);
 }
 
 function isValidDate(dateStr) {
@@ -95,20 +130,42 @@ function isValidDate(dateStr) {
   return /^\d{4}-\d{2}-\d{2}$/.test(dateStr.trim());
 }
 
+function isValidId(idStr) {
+  if (typeof idStr !== 'string') return false;
+  return /^[a-zA-Z0-9_-]{1,100}$/.test(idStr.trim());
+}
+
 /**
- * Universal Express / Serverless API Handler for Database Operations
+ * Universal Express / Serverless API Handler
  */
 export async function handleApiRequest(req, res, next) {
-  // Apply Rate Limiting
-  if (checkRateLimit(req)) {
-    return sendJson(res, 429, { success: false, error: 'Too many requests. Please try again later.' });
+  applyCorsHeaders(req, res);
+
+  const method = req.method.toUpperCase();
+
+  // Handle CORS Preflight
+  if (method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
+  const isWrite = method === 'POST' || method === 'PATCH' || method === 'DELETE';
+
+  // 1. Rate Limiting Check
+  if (checkRateLimit(req, isWrite)) {
+    return sendJson(res, 429, { success: false, error: 'Too many requests. Please slow down.' });
+  }
+
+  // 2. Authentication Check
+  if (!authenticateRequest(req)) {
+    return sendJson(res, 401, { success: false, error: 'Unauthorized: Invalid API Key' });
   }
 
   const url = req.url.split('?')[0];
-  const method = req.method.toUpperCase();
   const path = url.replace(/^\/api/, '') || '/';
 
-  // 1. Real-Time SSE Stream: /sync/events
+  // 3. Real-Time SSE Stream: /sync/events
   if (path === '/sync/events' && method === 'GET') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -125,7 +182,7 @@ export async function handleApiRequest(req, res, next) {
     return;
   }
 
-  // Ensure DB initialized before executing endpoints
+  // Ensure DB connection is initialized
   try {
     await initDatabase();
   } catch (err) {
@@ -133,7 +190,7 @@ export async function handleApiRequest(req, res, next) {
     return sendJson(res, 500, { success: false, error: 'Database service unavailable' });
   }
 
-  // 2. GET /data
+  // 4. GET /data
   if (path === '/data' && method === 'GET') {
     try {
       const data = await getAllData();
@@ -144,14 +201,14 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 3. POST /meals/toggle
+  // 5. POST /meals/toggle
   if (path === '/meals/toggle' && method === 'POST') {
     try {
       const body = await parseJsonBody(req, res);
-      const date = sanitizeString(body.date, 10);
-      const recurringItemId = sanitizeString(body.recurringItemId, 100);
+      const date = sanitizeInput(body.date, 10);
+      const recurringItemId = sanitizeInput(body.recurringItemId, 100);
 
-      if (!isValidDate(date) || !recurringItemId) {
+      if (!isValidDate(date) || !isValidId(recurringItemId)) {
         return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) and recurringItemId required' });
       }
 
@@ -205,12 +262,12 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 4. POST /meals/notes
+  // 6. POST /meals/notes
   if (path === '/meals/notes' && method === 'POST') {
     try {
       const body = await parseJsonBody(req, res);
-      const date = sanitizeString(body.date, 10);
-      const notes = sanitizeString(body.notes, 2000);
+      const date = sanitizeInput(body.date, 10);
+      const notes = sanitizeInput(body.notes, 2000);
 
       if (!isValidDate(date)) return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) required' });
 
@@ -246,24 +303,28 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 5. POST /expenses
+  // 7. POST /expenses
   if (path === '/expenses' && method === 'POST') {
     try {
       const body = await parseJsonBody(req, res);
-      const id = body.id ? sanitizeString(body.id, 100) : null;
-      const date = sanitizeString(body.date, 10);
-      const description = sanitizeString(body.description, 300);
-      const category = sanitizeString(body.category, 50) || 'other';
-      const notes = sanitizeString(body.notes, 1000);
+      const id = body.id ? sanitizeInput(body.id, 100) : null;
+      const date = sanitizeInput(body.date, 10);
+      const description = sanitizeInput(body.description, 300);
+      const category = sanitizeInput(body.category, 50) || 'other';
+      const notes = sanitizeInput(body.notes, 1000);
 
       if (!isValidDate(date) || !description) {
         return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) and description required' });
       }
 
+      if (id && !isValidId(id)) {
+        return sendJson(res, 400, { success: false, error: 'Invalid expense ID format' });
+      }
+
       const month = date.slice(0, 7);
-      const uPrice = Number.isFinite(Number(body.unitPrice)) ? Math.max(0, Number(body.unitPrice)) : 0;
-      const qty = Number.isInteger(Number(body.quantity)) ? Math.max(1, Number(body.quantity)) : 1;
-      const tot = Number.isFinite(Number(body.totalAmount)) ? Math.max(0, Number(body.totalAmount)) : uPrice * qty;
+      const uPrice = Number.isFinite(Number(body.unitPrice)) ? Math.min(Math.max(0, Number(body.unitPrice)), 1000000) : 0;
+      const qty = Number.isInteger(Number(body.quantity)) ? Math.min(Math.max(1, Number(body.quantity)), 10000) : 1;
+      const tot = Number.isFinite(Number(body.totalAmount)) ? Math.min(Math.max(0, Number(body.totalAmount)), 10000000) : uPrice * qty;
       const now = new Date().toISOString();
 
       const expenseId = id || `exp-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
@@ -310,12 +371,11 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 6. DELETE /expenses/:id
-  if (path.startsWith('/expenses/') && method === 'DELETE') {
+  // 8. DELETE /expenses/:id (Strict Regex Parameter Parsing)
+  const deleteExpenseMatch = path.match(/^\/expenses\/([a-zA-Z0-9_-]{1,100})$/);
+  if (deleteExpenseMatch && method === 'DELETE') {
     try {
-      const id = sanitizeString(path.replace('/expenses/', ''), 100);
-      if (!id) return sendJson(res, 400, { success: false, error: 'Expense ID required' });
-
+      const id = deleteExpenseMatch[1];
       await db.execute({
         sql: 'DELETE FROM expenses WHERE id = ?',
         args: [id],
@@ -328,21 +388,25 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 7. POST /recurring
+  // 9. POST /recurring
   if (path === '/recurring' && method === 'POST') {
     try {
       const body = await parseJsonBody(req, res);
-      const id = body.id ? sanitizeString(body.id, 100) : null;
-      const name = sanitizeString(body.name, 200);
-      const frequency = sanitizeString(body.frequency, 50) || 'daily';
+      const id = body.id ? sanitizeInput(body.id, 100) : null;
+      const name = sanitizeInput(body.name, 200);
+      const frequency = sanitizeInput(body.frequency, 50) || 'daily';
       const startDate = isValidDate(body.startDate) ? body.startDate : new Date().toISOString().slice(0, 10);
       const endDate = isValidDate(body.endDate) ? body.endDate : null;
-      const icon = sanitizeString(body.icon, 10) || '🍽️';
-      const description = sanitizeString(body.description, 500);
+      const icon = sanitizeInput(body.icon, 10) || '🍽️';
+      const description = sanitizeInput(body.description, 500);
 
       if (!name) return sendJson(res, 400, { success: false, error: 'Name required' });
 
-      const price = Number.isFinite(Number(body.pricePerOccurrence)) ? Math.max(0, Number(body.pricePerOccurrence)) : 0;
+      if (id && !isValidId(id)) {
+        return sendJson(res, 400, { success: false, error: 'Invalid recurring item ID format' });
+      }
+
+      const price = Number.isFinite(Number(body.pricePerOccurrence)) ? Math.min(Math.max(0, Number(body.pricePerOccurrence)), 1000000) : 0;
       const now = new Date().toISOString();
       const itemId = id || `rec-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
@@ -382,11 +446,11 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 8. PATCH /recurring/:id/toggle
-  if (path.startsWith('/recurring/') && path.endsWith('/toggle') && method === 'PATCH') {
+  // 10. PATCH /recurring/:id/toggle (Strict Regex Parsing)
+  const toggleRecurringMatch = path.match(/^\/recurring\/([a-zA-Z0-9_-]{1,100})\/toggle$/);
+  if (toggleRecurringMatch && method === 'PATCH') {
     try {
-      const id = sanitizeString(path.replace('/recurring/', '').replace('/toggle', ''), 100);
-      if (!id) return sendJson(res, 400, { success: false, error: 'Item ID required' });
+      const id = toggleRecurringMatch[1];
 
       const currentRes = await db.execute({
         sql: 'SELECT is_active FROM recurring_items WHERE id = ?',
@@ -409,11 +473,11 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 9. DELETE /recurring/:id
-  if (path.startsWith('/recurring/') && method === 'DELETE') {
+  // 11. DELETE /recurring/:id (Strict Regex Parsing)
+  const deleteRecurringMatch = path.match(/^\/recurring\/([a-zA-Z0-9_-]{1,100})$/);
+  if (deleteRecurringMatch && method === 'DELETE') {
     try {
-      const id = sanitizeString(path.replace('/recurring/', ''), 100);
-      if (!id) return sendJson(res, 400, { success: false, error: 'Item ID required' });
+      const id = deleteRecurringMatch[1];
 
       await db.execute({
         sql: 'DELETE FROM recurring_items WHERE id = ?',
@@ -427,7 +491,7 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 10. POST /settings
+  // 12. POST /settings
   if (path === '/settings' && method === 'POST') {
     try {
       const settingsObj = await parseJsonBody(req, res);
@@ -439,8 +503,8 @@ export async function handleApiRequest(req, res, next) {
       const statements = [];
 
       for (const [k, v] of Object.entries(settingsObj)) {
-        const sanitizedKey = sanitizeString(k, 100);
-        const sanitizedVal = sanitizeString(String(v), 500);
+        const sanitizedKey = sanitizeInput(k, 100);
+        const sanitizedVal = sanitizeInput(String(v), 500);
         if (sanitizedKey) {
           statements.push({
             sql: `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
@@ -464,10 +528,16 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 11. POST /clear (Data Reset protection)
+  // 13. POST /clear (Data Reset protection with Admin Secret support)
   if (path === '/clear' && method === 'POST') {
     try {
       const body = await parseJsonBody(req, res);
+      const adminSecret = process.env.ADMIN_SECRET;
+
+      if (adminSecret && req.headers['x-admin-secret'] !== adminSecret) {
+        return sendJson(res, 403, { success: false, error: 'Forbidden: Invalid Admin Secret' });
+      }
+
       if (body.confirm !== true) {
         return sendJson(res, 400, { success: false, error: 'Data clear confirmation required' });
       }
@@ -486,7 +556,7 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // Fallthrough to next middleware
+  // Fallthrough 404
   if (next) {
     next();
   } else {
