@@ -7,7 +7,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Configuration:
 // 1. TURSO_DATABASE_URL + TURSO_AUTH_TOKEN -> Cloud Turso Serverless Database (Vercel)
 // 2. Local development -> Local SQLite file
-const isTurso = !!process.env.TURSO_DATABASE_URL;
 const localDbPath = path.join(__dirname, 'expenses.db');
 
 export const db = createClient({
@@ -63,8 +62,21 @@ export async function initDatabase() {
           quantity INTEGER NOT NULL DEFAULT 1,
           total_amount REAL NOT NULL,
           notes TEXT DEFAULT '',
+          attachment TEXT DEFAULT '',
           created_at TEXT,
           updated_at TEXT
+        );`,
+        args: [],
+      },
+      {
+        sql: `CREATE TABLE IF NOT EXISTS budgets (
+          id TEXT PRIMARY KEY,
+          month TEXT NOT NULL,
+          category TEXT NOT NULL,
+          amount REAL NOT NULL,
+          created_at TEXT,
+          updated_at TEXT,
+          UNIQUE(month, category)
         );`,
         args: [],
       },
@@ -77,6 +89,13 @@ export async function initDatabase() {
         args: [],
       },
     ], 'write');
+
+    // Safe migration: Add attachment column if expenses table existed previously without it
+    try {
+      await db.execute('ALTER TABLE expenses ADD COLUMN attachment TEXT DEFAULT ""');
+    } catch (e) {
+      // Column already exists or table freshly created
+    }
 
     // Default recurring templates if empty
     const countRes = await db.execute('SELECT COUNT(*) as count FROM recurring_items');
@@ -179,10 +198,11 @@ export async function initDatabase() {
 export async function getAllData() {
   await initDatabase();
 
-  const [recRes, mealRes, expRes, setRes] = await Promise.all([
+  const [recRes, mealRes, expRes, budgetRes, setRes] = await Promise.all([
     db.execute('SELECT * FROM recurring_items'),
     db.execute('SELECT * FROM meal_tracker ORDER BY date ASC'),
     db.execute('SELECT * FROM expenses ORDER BY date DESC'),
+    db.execute('SELECT * FROM budgets'),
     db.execute('SELECT * FROM settings'),
   ]);
 
@@ -221,8 +241,18 @@ export async function getAllData() {
     quantity: Number(e.quantity),
     totalAmount: Number(e.total_amount),
     notes: e.notes ? String(e.notes) : '',
+    attachment: e.attachment ? String(e.attachment) : '',
     createdAt: e.created_at ? String(e.created_at) : null,
     updatedAt: e.updated_at ? String(e.updated_at) : null,
+  }));
+
+  const budgets = budgetRes.rows.map((b) => ({
+    id: String(b.id),
+    month: String(b.month),
+    category: String(b.category),
+    amount: Number(b.amount),
+    createdAt: b.created_at ? String(b.created_at) : null,
+    updatedAt: b.updated_at ? String(b.updated_at) : null,
   }));
 
   const settings = {};
@@ -231,5 +261,5 @@ export async function getAllData() {
     settings[String(s.key)] = val === 'true' ? true : val === 'false' ? false : val;
   }
 
-  return { recurringItems, mealTracker, expenses, settings };
+  return { recurringItems, mealTracker, expenses, budgets, settings };
 }

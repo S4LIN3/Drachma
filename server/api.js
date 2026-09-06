@@ -47,7 +47,7 @@ function applyCorsHeaders(req, res) {
   res.setHeader('Access-Control-Max-Age', '86400');
 }
 
-// Dual-Tier In-Memory Rate Limiter (Reads: 100/min, Writes: 30/min per IP)
+// Dual-Tier In-Memory Rate Limiter (Reads: 120/min, Writes: 35/min per IP)
 const rateLimitMap = new Map();
 
 function checkRateLimit(req, isWriteOperation = false) {
@@ -84,7 +84,7 @@ function authenticateRequest(req) {
   return apiKeyHeader === secretKey;
 }
 
-// Body Size Limiter & JSON Parsing (100KB Cap)
+// Body Size Limiter & JSON Parsing (600KB Cap for compressed receipt images)
 async function parseJsonBody(req, res) {
   if (req.body && typeof req.body === 'object') {
     return req.body;
@@ -93,7 +93,7 @@ async function parseJsonBody(req, res) {
   return new Promise((resolve, reject) => {
     let raw = '';
     let bytesRead = 0;
-    const MAX_BYTES = 100 * 1024; // 100 KB max limit
+    const MAX_BYTES = 600 * 1024; // 600 KB max limit
 
     req.on('data', (chunk) => {
       bytesRead += chunk.length;
@@ -312,6 +312,7 @@ export async function handleApiRequest(req, res, next) {
       const description = sanitizeInput(body.description, 300);
       const category = sanitizeInput(body.category, 50) || 'other';
       const notes = sanitizeInput(body.notes, 1000);
+      const attachment = typeof body.attachment === 'string' ? body.attachment.slice(0, 500000) : '';
 
       if (!isValidDate(date) || !description) {
         return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) and description required' });
@@ -336,15 +337,15 @@ export async function handleApiRequest(req, res, next) {
       if (existingRes.rows.length > 0) {
         await db.execute({
           sql: `UPDATE expenses 
-                SET date = ?, month = ?, description = ?, category = ?, unit_price = ?, quantity = ?, total_amount = ?, notes = ?, updated_at = ?
+                SET date = ?, month = ?, description = ?, category = ?, unit_price = ?, quantity = ?, total_amount = ?, notes = ?, attachment = ?, updated_at = ?
                 WHERE id = ?`,
-          args: [date, month, description, category, uPrice, qty, tot, notes, now, expenseId],
+          args: [date, month, description, category, uPrice, qty, tot, notes, attachment, now, expenseId],
         });
       } else {
         await db.execute({
-          sql: `INSERT INTO expenses (id, date, month, description, category, unit_price, quantity, total_amount, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [expenseId, date, month, description, category, uPrice, qty, tot, notes, now, now],
+          sql: `INSERT INTO expenses (id, date, month, description, category, unit_price, quantity, total_amount, notes, attachment, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [expenseId, date, month, description, category, uPrice, qty, tot, notes, attachment, now, now],
         });
       }
 
@@ -358,6 +359,7 @@ export async function handleApiRequest(req, res, next) {
         quantity: qty,
         totalAmount: tot,
         notes,
+        attachment,
         updatedAt: now,
       };
 
@@ -491,7 +493,58 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 12. POST /settings
+  // 12. POST /budgets
+  if (path === '/budgets' && method === 'POST') {
+    try {
+      const body = await parseJsonBody(req, res);
+      const id = body.id ? sanitizeInput(body.id, 100) : null;
+      const month = sanitizeInput(body.month, 7);
+      const category = sanitizeInput(body.category, 50) || 'overall';
+      const amount = Number.isFinite(Number(body.amount)) ? Math.max(0, Number(body.amount)) : 0;
+
+      if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+        return sendJson(res, 400, { success: false, error: 'Valid month (YYYY-MM) required' });
+      }
+
+      const now = new Date().toISOString();
+      const budgetId = id || `bgt-${month}-${category}`;
+
+      await db.execute({
+        sql: `INSERT INTO budgets (id, month, category, amount, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(month, category) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at`,
+        args: [budgetId, month, category, amount, now, now],
+      });
+
+      const savedBudget = { id: budgetId, month, category, amount, updatedAt: now };
+      broadcastEvent('BUDGET_SAVED', savedBudget);
+      return sendJson(res, 200, { success: true, data: savedBudget });
+    } catch (err) {
+      if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
+      if (err.message === 'INVALID_JSON') return sendJson(res, 400, { success: false, error: 'Malformed JSON payload' });
+      console.error('Error saving budget:', err);
+      return sendJson(res, 500, { success: false, error: 'Failed to save budget' });
+    }
+  }
+
+  // 13. DELETE /budgets/:id
+  const deleteBudgetMatch = path.match(/^\/budgets\/([a-zA-Z0-9_-]{1,100})$/);
+  if (deleteBudgetMatch && method === 'DELETE') {
+    try {
+      const id = deleteBudgetMatch[1];
+      await db.execute({
+        sql: 'DELETE FROM budgets WHERE id = ?',
+        args: [id],
+      });
+      broadcastEvent('BUDGET_DELETED', { id });
+      return sendJson(res, 200, { success: true, data: { id } });
+    } catch (err) {
+      console.error('Error deleting budget:', err);
+      return sendJson(res, 500, { success: false, error: 'Failed to delete budget' });
+    }
+  }
+
+  // 14. POST /settings
   if (path === '/settings' && method === 'POST') {
     try {
       const settingsObj = await parseJsonBody(req, res);
@@ -528,7 +581,7 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 13. POST /clear (Data Reset protection with Admin Secret support)
+  // 15. POST /clear (Data Reset protection with Admin Secret support)
   if (path === '/clear' && method === 'POST') {
     try {
       const body = await parseJsonBody(req, res);
@@ -546,6 +599,7 @@ export async function handleApiRequest(req, res, next) {
         { sql: 'DELETE FROM meal_tracker', args: [] },
         { sql: 'DELETE FROM expenses', args: [] },
         { sql: 'DELETE FROM recurring_items', args: [] },
+        { sql: 'DELETE FROM budgets', args: [] },
       ], 'write');
 
       broadcastEvent('DATA_CLEARED', {});

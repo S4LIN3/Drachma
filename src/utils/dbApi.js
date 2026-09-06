@@ -133,6 +133,29 @@ export async function dbSaveSettings(settings) {
   return data;
 }
 
+export async function dbSaveBudget(budgetData) {
+  const res = await fetch(`${API_BASE}/budgets`, {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(budgetData),
+  });
+  if (!res.ok) throw new Error('Failed to save budget in database');
+  const json = await res.json();
+  notifyLocalSync('BUDGET_SAVED', json.data);
+  return json.data;
+}
+
+export async function dbDeleteBudget(id) {
+  const res = await fetch(`${API_BASE}/budgets/${id}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to delete budget in database');
+  const data = await res.json();
+  notifyLocalSync('BUDGET_DELETED', { id });
+  return data;
+}
+
 export async function dbClearAll() {
   const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
   if (ADMIN_SECRET) {

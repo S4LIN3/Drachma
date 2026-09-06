@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { EXPENSE_CATEGORIES } from '../constants/categories';
 import { formatCurrency } from '../constants/currencies';
 import { validateExpense } from '../utils/validation';
 import { getTodayDateStr } from '../utils/dateHelpers';
-import { X, ShoppingBag } from 'lucide-react';
+import { X, ShoppingBag, Camera, Trash2, Image as ImageIcon } from 'lucide-react';
 
 export const ExpenseFormModal = ({
   isOpen,
@@ -13,6 +13,7 @@ export const ExpenseFormModal = ({
   onSave,
   onClose,
 }) => {
+  const fileInputRef = useRef(null);
   const [formData, setFormData] = useState({
     date: initialDate || getTodayDateStr(),
     description: '',
@@ -20,6 +21,7 @@ export const ExpenseFormModal = ({
     unitPrice: '',
     quantity: 1,
     notes: '',
+    attachment: '',
   });
 
   const [errors, setErrors] = useState({});
@@ -33,6 +35,7 @@ export const ExpenseFormModal = ({
         unitPrice: editingExpense.unitPrice || '',
         quantity: editingExpense.quantity || 1,
         notes: editingExpense.notes || '',
+        attachment: editingExpense.attachment || '',
       });
     } else {
       setFormData({
@@ -42,6 +45,7 @@ export const ExpenseFormModal = ({
         unitPrice: '',
         quantity: 1,
         notes: '',
+        attachment: '',
       });
     }
     setErrors({});
@@ -62,6 +66,45 @@ export const ExpenseFormModal = ({
   const unitPriceNum = Number(formData.unitPrice) || 0;
   const quantityNum = Number(formData.quantity) || 1;
   const computedTotal = unitPriceNum * quantityNum;
+
+  const handleImageUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 800;
+        const MAX_HEIGHT = 800;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
+        setFormData((prev) => ({ ...prev, attachment: compressedBase64 }));
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -86,7 +129,7 @@ export const ExpenseFormModal = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="expense-form-title"
-        className="bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl max-w-md w-full overflow-hidden text-neutral-900 dark:text-neutral-100"
+        className="bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl max-w-md w-full max-h-[90vh] flex flex-col overflow-hidden text-neutral-900 dark:text-neutral-100"
       >
         {/* Header */}
         <div className="p-4 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-neutral-50/50 dark:bg-neutral-850/50">
@@ -105,8 +148,8 @@ export const ExpenseFormModal = ({
           </button>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="p-4 sm:p-5 space-y-3.5 text-xs">
+        {/* Form Body */}
+        <form onSubmit={handleSubmit} className="p-4 sm:p-5 space-y-3.5 text-xs overflow-y-auto flex-1">
           
           {/* Date Picker */}
           <div>
@@ -201,6 +244,46 @@ export const ExpenseFormModal = ({
             </span>
           </div>
 
+          {/* Receipt Attachment Upload */}
+          <div>
+            <label className="block text-[11px] font-semibold text-neutral-600 dark:text-neutral-400 mb-1">
+              Receipt Attachment (Optional Photo)
+            </label>
+            {formData.attachment ? (
+              <div className="relative rounded-lg border border-neutral-200 dark:border-neutral-700 p-2 bg-neutral-50 dark:bg-neutral-800/50 flex items-center justify-between">
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <img src={formData.attachment} alt="Receipt preview" className="w-10 h-10 object-cover rounded" />
+                  <span className="text-[11px] text-neutral-500 truncate">Receipt attached</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFormData({ ...formData, attachment: '' })}
+                  className="p-1 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 rounded"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full p-2.5 border border-dashed border-neutral-300 dark:border-neutral-700 hover:border-blue-500 dark:hover:border-blue-400 rounded-lg text-neutral-500 hover:text-blue-600 flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Attach / Capture Receipt Photo</span>
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  className="hidden"
+                />
+              </div>
+            )}
+          </div>
+
           {/* Notes */}
           <div>
             <label className="block text-[11px] font-semibold text-neutral-600 dark:text-neutral-400 mb-1">
@@ -216,7 +299,7 @@ export const ExpenseFormModal = ({
           </div>
 
           {/* Actions */}
-          <div className="pt-2 flex items-center justify-end gap-2">
+          <div className="pt-2 flex items-center justify-end gap-2 border-t border-neutral-200/80 dark:border-neutral-800">
             <button
               type="button"
               onClick={onClose}

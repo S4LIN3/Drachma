@@ -4,6 +4,9 @@ import { useExpenseTracker } from './hooks/useExpenseTracker';
 import { exportMonthToExcel, exportMonthToPDF } from './utils/exportReports';
 import { Header } from './components/Header';
 import { SummaryCards } from './components/SummaryCards';
+import { SmartQuickInputBar } from './components/SmartQuickInputBar';
+import { BudgetingModal } from './components/BudgetingModal';
+import { ReceiptLightboxModal } from './components/ReceiptLightboxModal';
 import { Calendar } from './components/Calendar';
 import { DailyPanel } from './components/DailyPanel';
 import { MobileQuickEntryView } from './components/MobileQuickEntryView';
@@ -28,6 +31,7 @@ export function App() {
     recurringItems,
     mealTracker,
     expenses,
+    budgets,
     settings,
     monthlyStats,
     selectedDateStats,
@@ -43,6 +47,9 @@ export function App() {
     addExpense,
     updateExpense,
     deleteExpense,
+    deleteMultipleExpenses,
+    batchUpdateCategory,
+    saveBudget,
     updateSettings,
     exportData,
     importData,
@@ -69,7 +76,11 @@ export function App() {
   const [isRecurringPanelOpen, setIsRecurringPanelOpen] = useState(false);
   const [isMonthPickerOpen, setIsMonthPickerOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isBudgetModalOpen, setIsBudgetModalOpen] = useState(false);
   const [isMobileDailyModalOpen, setIsMobileDailyModalOpen] = useState(false);
+
+  // Lightbox modal state for receipts
+  const [lightboxImage, setLightboxImage] = useState(null);
 
   // Confirmation Modal state
   const [confirmConfig, setConfirmConfig] = useState({
@@ -148,6 +159,20 @@ export function App() {
     });
   };
 
+  const handleDeleteMultipleExpensesRequest = (expenseIds = []) => {
+    setConfirmConfig({
+      isOpen: true,
+      title: `Delete ${expenseIds.length} Expenses`,
+      message: `Are you sure you want to delete ${expenseIds.length} selected expense records?`,
+      confirmText: 'Delete All Selected',
+      isDestructive: true,
+      onConfirm: () => {
+        deleteMultipleExpenses(expenseIds);
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
   const handleDeleteRecurringItemRequest = (item) => {
     setConfirmConfig({
       isOpen: true,
@@ -204,9 +229,7 @@ export function App() {
     );
   }
 
-  // ----------------------------------------------------
   // Dedicated Mobile PWA Quick Entry View
-  // ----------------------------------------------------
   if (isMobileQuickMode) {
     return (
       <>
@@ -224,7 +247,6 @@ export function App() {
           onToggleTheme={toggleTheme}
         />
 
-        {/* Confirmation Modal */}
         <ConfirmationModal
           isOpen={confirmConfig.isOpen}
           title={confirmConfig.title}
@@ -235,7 +257,6 @@ export function App() {
           onCancel={() => setConfirmConfig(prev => ({ ...prev, isOpen: false }))}
         />
 
-        {/* Toast Notifications */}
         <ToastNotification
           toasts={toasts}
           onDismiss={removeToast}
@@ -244,9 +265,7 @@ export function App() {
     );
   }
 
-  // ----------------------------------------------------
   // Full Web Dashboard View
-  // ----------------------------------------------------
   return (
     <div className="min-h-screen flex flex-col bg-[#FAFAFB] dark:bg-[#0F1012] text-neutral-900 dark:text-neutral-100 antialiased">
       
@@ -271,12 +290,20 @@ export function App() {
       />
 
       {/* Main Full-Screen Dynamic Container */}
-      <main className="w-full px-4 sm:px-8 xl:px-12 py-6 flex-1 flex flex-col">
+      <main className="w-full px-4 sm:px-8 xl:px-12 py-6 flex-1 flex flex-col space-y-5">
         
-        {/* 2. KPI Cards */}
+        {/* Smart Quick Input Bar (Natural Language Parsing) */}
+        <SmartQuickInputBar
+          onAddExpense={addExpense}
+          currency={settings.currency || 'INR'}
+          addToast={addToast}
+        />
+
+        {/* 2. KPI Summary Cards with Budgeting Goal */}
         <SummaryCards
           stats={monthlyStats}
           currency={settings.currency || 'INR'}
+          onOpenBudgetingModal={() => setIsBudgetModalOpen(true)}
         />
 
         {/* 3. Main Views */}
@@ -322,8 +349,11 @@ export function App() {
             onOpenAddExpense={() => handleOpenAddExpense()}
             onEditExpense={handleOpenEditExpense}
             onDeleteExpense={handleDeleteExpenseRequest}
+            onDeleteMultipleExpenses={handleDeleteMultipleExpensesRequest}
+            onBatchUpdateCategory={batchUpdateCategory}
             onExportExcel={handleExportExcel}
             onExportPDF={handleExportPDF}
+            onOpenLightbox={(imgSrc) => setLightboxImage(imgSrc)}
             onSelectDate={(dateStr) => {
               setSelectedDate(dateStr);
               setActiveView('calendar');
@@ -375,6 +405,22 @@ export function App() {
         currency={settings.currency || 'INR'}
         onSave={handleSaveExpense}
         onClose={() => setIsExpenseModalOpen(false)}
+      />
+
+      <BudgetingModal
+        isOpen={isBudgetModalOpen}
+        selectedMonth={selectedMonth}
+        monthlyStats={monthlyStats}
+        budgets={budgets}
+        currency={settings.currency || 'INR'}
+        onSaveBudget={saveBudget}
+        onClose={() => setIsBudgetModalOpen(false)}
+      />
+
+      <ReceiptLightboxModal
+        isOpen={!!lightboxImage}
+        imageSrc={lightboxImage}
+        onClose={() => setLightboxImage(null)}
       />
 
       <RecurringItemsPanel

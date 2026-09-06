@@ -12,6 +12,8 @@ import {
   dbToggleRecurringActive, 
   dbDeleteRecurringItem, 
   dbSaveSettings, 
+  dbSaveBudget,
+  dbDeleteBudget,
   dbClearAll, 
   subscribeToDbSync 
 } from '../utils/dbApi';
@@ -23,6 +25,7 @@ export const useExpenseTracker = (addToast) => {
   const [recurringItems, setRecurringItems] = useState([]);
   const [mealTracker, setMealTracker] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [budgets, setBudgets] = useState([]);
   const [settings, setSettings] = useState({
     theme: 'light',
     currency: 'INR',
@@ -37,6 +40,7 @@ export const useExpenseTracker = (addToast) => {
         if (Array.isArray(dbData.recurringItems)) setRecurringItems(dbData.recurringItems);
         if (Array.isArray(dbData.mealTracker)) setMealTracker(dbData.mealTracker);
         if (Array.isArray(dbData.expenses)) setExpenses(dbData.expenses);
+        if (Array.isArray(dbData.budgets)) setBudgets(dbData.budgets);
         if (dbData.settings && Object.keys(dbData.settings).length > 0) {
           setSettings(prev => ({ ...prev, ...dbData.settings }));
         }
@@ -118,8 +122,8 @@ export const useExpenseTracker = (addToast) => {
 
   // Real-time calculated monthly summary
   const monthlyStats = useMemo(() => {
-    return calculateMonthlyTotals(selectedMonth, mealTracker, expenses, recurringItems);
-  }, [selectedMonth, mealTracker, expenses, recurringItems]);
+    return calculateMonthlyTotals(selectedMonth, mealTracker, expenses, recurringItems, budgets);
+  }, [selectedMonth, mealTracker, expenses, recurringItems, budgets]);
 
   // Real-time calculated selected date details
   const selectedDateStats = useMemo(() => {
@@ -459,6 +463,48 @@ export const useExpenseTracker = (addToast) => {
     }
   }, [addToast, reloadFromDb]);
 
+  const saveBudget = useCallback((budgetData) => {
+    const budgetId = budgetData.id || `bgt-${budgetData.month}-${budgetData.category}`;
+    const newBudgetObj = { ...budgetData, id: budgetId, updatedAt: new Date().toISOString() };
+
+    setBudgets((prev) => {
+      const idx = prev.findIndex((b) => b.month === budgetData.month && b.category === budgetData.category);
+      if (idx >= 0) {
+        const updated = [...prev];
+        updated[idx] = newBudgetObj;
+        return updated;
+      }
+      return [...prev, newBudgetObj];
+    });
+
+    dbSaveBudget(newBudgetObj).catch((err) => console.error('Failed to save budget:', err));
+    if (addToast) addToast('Monthly budget goal saved', 'success');
+  }, [addToast]);
+
+  const deleteMultipleExpenses = useCallback((expenseIds = []) => {
+    if (expenseIds.length === 0) return;
+    setExpenses((prev) => prev.filter((exp) => !expenseIds.includes(exp.id)));
+    for (const id of expenseIds) {
+      dbDeleteExpense(id).catch((err) => console.error('Failed to delete expense:', err));
+    }
+    if (addToast) addToast(`Deleted ${expenseIds.length} expenses`, 'info');
+  }, [addToast]);
+
+  const batchUpdateCategory = useCallback((expenseIds = [], newCategory) => {
+    if (expenseIds.length === 0 || !newCategory) return;
+    const now = new Date().toISOString();
+
+    setExpenses((prev) =>
+      prev.map((exp) => {
+        if (!expenseIds.includes(exp.id)) return exp;
+        const updated = { ...exp, category: newCategory, updatedAt: now };
+        dbSaveExpense(updated).catch((err) => console.error('Failed to batch update category:', err));
+        return updated;
+      })
+    );
+    if (addToast) addToast(`Updated category for ${expenseIds.length} items`, 'success');
+  }, [addToast]);
+
   const clearData = useCallback(async () => {
     try {
       await dbClearAll();
@@ -466,6 +512,7 @@ export const useExpenseTracker = (addToast) => {
       setRecurringItems([]);
       setMealTracker([]);
       setExpenses([]);
+      setBudgets([]);
       if (addToast) addToast('All database records cleared', 'info');
     } catch (err) {
       console.error('Clear data error:', err);
@@ -481,6 +528,7 @@ export const useExpenseTracker = (addToast) => {
     recurringItems,
     mealTracker,
     expenses,
+    budgets,
     settings,
     monthlyStats,
     selectedDateStats,
@@ -496,6 +544,9 @@ export const useExpenseTracker = (addToast) => {
     addExpense,
     updateExpense,
     deleteExpense,
+    deleteMultipleExpenses,
+    batchUpdateCategory,
+    saveBudget,
     updateSettings,
     exportData,
     importData,

@@ -23,7 +23,6 @@ export const getItemPriceForDate = (item, dateStr) => {
 
 /**
  * Checks if a recurring item is active and valid for a specific date.
- * Allows checking/marking previous days.
  */
 export const isItemActiveOnDate = (item, dateStr) => {
   if (!item || item.isActive === false) return false;
@@ -95,17 +94,54 @@ export const calculateDailyTotals = (dateStr, mealTrackerEntries = [], expenses 
 };
 
 /**
- * Calculates all aggregated monthly metrics:
- * - monthlyMealTotal
- * - monthlyMiscTotal
- * - monthlyOverallTotal
- * - averageDailyExpense
- * - mealDaysCount
- * - totalMealsMarkedCount
- * - categoryBreakdown
- * - dailyMap (covers current month and all grid cells)
+ * Calculates budget adherence & daily pacing recommendations for a month.
  */
-export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expenses = [], recurringItems = []) => {
+export const calculateBudgetStats = (monthKey, monthlyOverallTotal, categoryBreakdown = [], budgets = []) => {
+  const monthBudgets = budgets.filter((b) => b.month === monthKey);
+  const overallBudgetObj = monthBudgets.find((b) => b.category === 'overall');
+  const overallBudget = overallBudgetObj ? Number(overallBudgetObj.amount) : 0;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const isCurrentMonth = todayStr.startsWith(monthKey);
+  let remainingDays = 1;
+
+  if (isCurrentMonth) {
+    const todayNum = new Date().getDate();
+    const { year, monthIndex } = parseMonthKey(monthKey);
+    const daysInMonth = getDaysInMonth(year, monthIndex);
+    remainingDays = Math.max(1, daysInMonth - todayNum + 1);
+  }
+
+  const remainingBudget = Math.max(0, overallBudget - monthlyOverallTotal);
+  const safeDailyLimit = overallBudget > 0 ? Number((remainingBudget / remainingDays).toFixed(2)) : 0;
+  const budgetPercentage = overallBudget > 0 ? Math.min(100, Math.round((monthlyOverallTotal / overallBudget) * 100)) : 0;
+
+  let status = 'none'; // 'on_track' | 'warning' | 'exceeded' | 'none'
+  if (overallBudget > 0) {
+    if (monthlyOverallTotal > overallBudget) {
+      status = 'exceeded';
+    } else if (budgetPercentage >= 80) {
+      status = 'warning';
+    } else {
+      status = 'on_track';
+    }
+  }
+
+  return {
+    overallBudget,
+    remainingBudget,
+    safeDailyLimit,
+    budgetPercentage,
+    status,
+    remainingDays,
+    isCurrentMonth,
+  };
+};
+
+/**
+ * Calculates all aggregated monthly metrics & budget pacing.
+ */
+export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expenses = [], recurringItems = [], budgets = []) => {
   const { year, monthIndex } = parseMonthKey(monthKey);
   const daysInMonth = getDaysInMonth(year, monthIndex);
   
@@ -128,7 +164,6 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
   let totalMealsMarkedCount = 0;
   const mealTypeTotals = {};
   
-  // Track unique days with at least one meal marked
   for (const entry of monthMealEntries) {
     let dayHasMeal = false;
     if (entry.mealsMarked) {
@@ -184,6 +219,9 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
     count: data.count,
     percentage: monthlyMiscTotal > 0 ? Math.round((data.amount / monthlyMiscTotal) * 100) : 0,
   })).sort((a, b) => b.amount - a.amount);
+
+  // Budget Pacing Analysis
+  const budgetStats = calculateBudgetStats(monthKey, monthlyOverallTotal, categoryBreakdown, budgets);
   
   return {
     monthKey,
@@ -198,5 +236,6 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
     categoryBreakdown,
     dailyMap,
     expensesCount: monthExpenses.length,
+    budgetStats,
   };
 };
