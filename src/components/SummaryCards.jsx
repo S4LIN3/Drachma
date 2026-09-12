@@ -82,8 +82,19 @@ export const SummaryCards = ({ stats, currency = 'INR', onOpenBudgetingModal }) 
       id: 'meal-total',
       title: 'MEAL EXPENSES',
       value: formatCurrency(monthlyMealTotal, currency),
-      subtitle: `${mealPercentage}% of total (${mealDaysCount} days)`,
+      subtitle: stats?.unpaidMealTotal > 0 
+        ? `${formatCurrency(stats.paidMealTotal || 0, currency)} paid · ${formatCurrency(stats.unpaidMealTotal, currency)} unpaid due`
+        : `All marked meals paid (${mealDaysCount} days)`,
       icon: <Utensils className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />,
+      badge: stats?.unpaidMealTotal > 0 ? (
+        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+          Due: {formatCurrency(stats.unpaidMealTotal, currency)}
+        </span>
+      ) : monthlyMealTotal > 0 ? (
+        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+          🟢 All Paid
+        </span>
+      ) : null,
     },
     {
       id: 'misc-total',

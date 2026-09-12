@@ -1,14 +1,16 @@
 import React, { useState } from 'react';
 import { formatCurrency } from '../constants/currencies';
 import { validateRecurringItem } from '../utils/validation';
-import { getTodayDateStr } from '../utils/dateHelpers';
+import { getTodayDateStr, formatDateDisplay } from '../utils/dateHelpers';
+import { getPaidTillDate } from '../utils/calculations';
 import { 
   X, 
   Plus, 
   UtensilsCrossed, 
   Edit3, 
   Trash2, 
-  Power
+  Power,
+  Receipt
 } from 'lucide-react';
 
 const COMMON_ICONS = ['🍽️', '🥘', '☕', '🥪', '🥗', '🍕', '🍲', '🥛', '🍎', '🍜'];
@@ -16,12 +18,14 @@ const COMMON_ICONS = ['🍽️', '🥘', '☕', '🥪', '🥗', '🍕', '🍲', 
 export const RecurringItemsPanel = ({
   isOpen,
   recurringItems = [],
+  mealTracker = [],
   currency = 'INR',
   onClose,
   onAdd,
   onUpdate,
   onToggleActive,
   onDeleteRequest,
+  onOpenMarkAsPaid,
 }) => {
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
@@ -109,7 +113,7 @@ export const RecurringItemsPanel = ({
             <div>
               <h2 className="text-sm font-bold leading-none">Recurring Meal Templates</h2>
               <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
-                Configure templates used for daily meal marking
+                Configure templates & manage meal payments
               </p>
             </div>
           </div>
@@ -225,7 +229,7 @@ export const RecurringItemsPanel = ({
           )}
 
           {/* List of Recurring Items */}
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             {recurringItems.length === 0 ? (
               <div className="py-6 text-center border border-dashed border-neutral-200 dark:border-neutral-800 rounded-lg text-neutral-400">
                 No templates configured.
@@ -233,63 +237,94 @@ export const RecurringItemsPanel = ({
             ) : (
               recurringItems.map((item) => {
                 const isActive = item.isActive !== false;
+                const paidTillDate = getPaidTillDate(item.id, mealTracker);
+
                 return (
                   <div
                     key={item.id}
-                    className={`p-3 rounded-lg border transition-colors flex items-center justify-between gap-3 ${
+                    className={`p-3 rounded-xl border transition-colors space-y-2.5 ${
                       isActive
                         ? 'bg-white dark:bg-neutral-800/80 border-neutral-200 dark:border-neutral-700'
                         : 'bg-neutral-50 dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800 opacity-60'
                     }`}
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="text-xl p-1.5 rounded-md bg-neutral-50 dark:bg-neutral-800">
-                        {item.icon || '🍽️'}
-                      </span>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <h4 className="font-semibold text-neutral-900 dark:text-white truncate">
-                            {item.name}
-                          </h4>
-                          <span
-                            className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded ${
-                              isActive
-                                ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
-                                : 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800'
-                            }`}
-                          >
-                            {isActive ? 'Active' : 'Paused'}
-                          </span>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="text-xl p-1.5 rounded-md bg-neutral-50 dark:bg-neutral-800">
+                          {item.icon || '🍽️'}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <h4 className="font-semibold text-neutral-900 dark:text-white truncate">
+                              {item.name}
+                            </h4>
+                            <span
+                              className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded ${
+                                isActive
+                                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                                  : 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800'
+                              }`}
+                            >
+                              {isActive ? 'Active' : 'Paused'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
+                            {formatCurrency(item.pricePerOccurrence, currency)} / occurrence
+                          </div>
                         </div>
-                        <div className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
-                          {formatCurrency(item.pricePerOccurrence, currency)} / occurrence
-                        </div>
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => onToggleActive(item.id)}
+                          className="p-1.5 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                          title={isActive ? 'Pause' : 'Activate'}
+                        >
+                          <Power className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleOpenEdit(item)}
+                          className="p-1.5 text-neutral-400 hover:text-blue-600 dark:hover:text-blue-400 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                          title="Edit"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onDeleteRequest(item)}
+                          className="p-1.5 text-neutral-400 hover:text-red-600 dark:hover:text-red-400 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                          title="Delete"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
 
-                    {/* Actions */}
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        onClick={() => onToggleActive(item.id)}
-                        className="p-1.5 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700"
-                        title={isActive ? 'Pause' : 'Activate'}
-                      >
-                        <Power className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleOpenEdit(item)}
-                        className="p-1.5 text-neutral-400 hover:text-blue-600 dark:hover:text-blue-400 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700"
-                        title="Edit"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => onDeleteRequest(item)}
-                        className="p-1.5 text-neutral-400 hover:text-red-600 dark:hover:text-red-400 rounded hover:bg-neutral-100 dark:hover:bg-neutral-700"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                    {/* Paid Till Banner & Mark as Paid Action */}
+                    <div className="pt-2 border-t border-neutral-100 dark:border-neutral-750 flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
+                        {paidTillDate ? (
+                          <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 font-semibold">
+                            <span>Paid Till:</span>
+                            <span className="bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-200/80 dark:border-emerald-800">
+                              {formatDateDisplay(paidTillDate, 'short')}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className="text-amber-600 dark:text-amber-400 font-medium">No meals marked paid</span>
+                        )}
+                      </span>
+
+                      {onOpenMarkAsPaid && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenMarkAsPaid(item.id)}
+                          className="px-2.5 py-1 text-[11px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg flex items-center gap-1 transition-colors shadow-2xs"
+                        >
+                          <Receipt className="w-3 h-3" />
+                          <span>Mark as Paid</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 );

@@ -88,11 +88,33 @@ export async function initDatabase() {
         );`,
         args: [],
       },
+      {
+        sql: `CREATE TABLE IF NOT EXISTS payments (
+          id TEXT PRIMARY KEY,
+          recurring_item_id TEXT NOT NULL,
+          start_date TEXT NOT NULL,
+          paid_till_date TEXT NOT NULL,
+          meal_count INTEGER NOT NULL,
+          total_amount REAL NOT NULL,
+          payment_date TEXT NOT NULL,
+          notes TEXT DEFAULT '',
+          created_at TEXT,
+          updated_at TEXT
+        );`,
+        args: [],
+      },
     ], 'write');
 
     // Safe migration: Add attachment column if expenses table existed previously without it
     try {
       await db.execute('ALTER TABLE expenses ADD COLUMN attachment TEXT DEFAULT ""');
+    } catch (e) {
+      // Column already exists or table freshly created
+    }
+
+    // Safe migration: Add meals_paid column if meal_tracker table existed previously without it
+    try {
+      await db.execute('ALTER TABLE meal_tracker ADD COLUMN meals_paid TEXT DEFAULT "{}"');
     } catch (e) {
       // Column already exists or table freshly created
     }
@@ -198,12 +220,13 @@ export async function initDatabase() {
 export async function getAllData() {
   await initDatabase();
 
-  const [recRes, mealRes, expRes, budgetRes, setRes] = await Promise.all([
+  const [recRes, mealRes, expRes, budgetRes, setRes, payRes] = await Promise.all([
     db.execute('SELECT * FROM recurring_items'),
     db.execute('SELECT * FROM meal_tracker ORDER BY date ASC'),
     db.execute('SELECT * FROM expenses ORDER BY date DESC'),
     db.execute('SELECT * FROM budgets'),
     db.execute('SELECT * FROM settings'),
+    db.execute('SELECT * FROM payments ORDER BY payment_date DESC, created_at DESC'),
   ]);
 
   const recurringItems = recRes.rows.map((r) => ({
@@ -226,6 +249,7 @@ export async function getAllData() {
     date: String(m.date),
     month: String(m.month),
     mealsMarked: m.meals_marked ? JSON.parse(String(m.meals_marked)) : {},
+    mealsPaid: m.meals_paid ? JSON.parse(String(m.meals_paid)) : {},
     notes: m.notes ? String(m.notes) : '',
     createdAt: m.created_at ? String(m.created_at) : null,
     updatedAt: m.updated_at ? String(m.updated_at) : null,
@@ -261,5 +285,18 @@ export async function getAllData() {
     settings[String(s.key)] = val === 'true' ? true : val === 'false' ? false : val;
   }
 
-  return { recurringItems, mealTracker, expenses, budgets, settings };
+  const payments = payRes.rows.map((p) => ({
+    id: String(p.id),
+    recurringItemId: String(p.recurring_item_id),
+    startDate: String(p.start_date),
+    paidTillDate: String(p.paid_till_date),
+    mealCount: Number(p.meal_count),
+    totalAmount: Number(p.total_amount),
+    paymentDate: String(p.payment_date),
+    notes: p.notes ? String(p.notes) : '',
+    createdAt: p.created_at ? String(p.created_at) : null,
+    updatedAt: p.updated_at ? String(p.updated_at) : null,
+  }));
+
+  return { recurringItems, mealTracker, expenses, budgets, settings, payments };
 }

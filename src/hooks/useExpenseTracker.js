@@ -14,6 +14,8 @@ import {
   dbSaveSettings, 
   dbSaveBudget,
   dbDeleteBudget,
+  dbMarkMealsAsPaid,
+  dbDeletePayment,
   dbClearAll, 
   subscribeToDbSync 
 } from '../utils/dbApi';
@@ -26,6 +28,7 @@ export const useExpenseTracker = (addToast) => {
   const [mealTracker, setMealTracker] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [budgets, setBudgets] = useState([]);
+  const [payments, setPayments] = useState([]);
   const [settings, setSettings] = useState({
     theme: 'light',
     currency: 'INR',
@@ -41,6 +44,7 @@ export const useExpenseTracker = (addToast) => {
         if (Array.isArray(dbData.mealTracker)) setMealTracker(dbData.mealTracker);
         if (Array.isArray(dbData.expenses)) setExpenses(dbData.expenses);
         if (Array.isArray(dbData.budgets)) setBudgets(dbData.budgets);
+        if (Array.isArray(dbData.payments)) setPayments(dbData.payments);
         if (dbData.settings && Object.keys(dbData.settings).length > 0) {
           setSettings(prev => ({ ...prev, ...dbData.settings }));
         }
@@ -513,11 +517,38 @@ export const useExpenseTracker = (addToast) => {
       setMealTracker([]);
       setExpenses([]);
       setBudgets([]);
+      setPayments([]);
       if (addToast) addToast('All database records cleared', 'info');
     } catch (err) {
       console.error('Clear data error:', err);
     }
   }, [addToast]);
+
+  const markMealsAsPaid = useCallback(async ({ recurringItemId, paidTillDate, notes }) => {
+    try {
+      const resData = await dbMarkMealsAsPaid({ recurringItemId, paidTillDate, notes });
+      await reloadFromDb();
+      if (addToast) {
+        addToast(`Payment recorded through ${paidTillDate}`, 'success');
+      }
+      return resData;
+    } catch (err) {
+      console.error('Failed to mark meals as paid:', err);
+      if (addToast) addToast(err.message || 'Failed to record meal payment', 'error');
+      throw err;
+    }
+  }, [addToast, reloadFromDb]);
+
+  const deletePayment = useCallback(async (paymentId) => {
+    try {
+      await dbDeletePayment(paymentId);
+      await reloadFromDb();
+      if (addToast) addToast('Payment record reversed', 'info');
+    } catch (err) {
+      console.error('Failed to delete payment record:', err);
+      if (addToast) addToast('Failed to revert payment', 'error');
+    }
+  }, [addToast, reloadFromDb]);
 
   return {
     isLoaded,
@@ -529,6 +560,7 @@ export const useExpenseTracker = (addToast) => {
     mealTracker,
     expenses,
     budgets,
+    payments,
     settings,
     monthlyStats,
     selectedDateStats,
@@ -547,6 +579,8 @@ export const useExpenseTracker = (addToast) => {
     deleteMultipleExpenses,
     batchUpdateCategory,
     saveBudget,
+    markMealsAsPaid,
+    deletePayment,
     updateSettings,
     exportData,
     importData,

@@ -156,6 +156,32 @@ export async function dbDeleteBudget(id) {
   return data;
 }
 
+export async function dbMarkMealsAsPaid({ recurringItemId, paidTillDate, notes }) {
+  const res = await fetch(`${API_BASE}/payments/mark-paid`, {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ recurringItemId, paidTillDate, notes }),
+  });
+  if (!res.ok) {
+    const errorJson = await res.json().catch(() => ({}));
+    throw new Error(errorJson.error || 'Failed to mark meals as paid');
+  }
+  const json = await res.json();
+  notifyLocalSync('MEAL_PAID', json.data);
+  return json.data;
+}
+
+export async function dbDeletePayment(paymentId) {
+  const res = await fetch(`${API_BASE}/payments/${paymentId}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to delete payment record');
+  const data = await res.json();
+  notifyLocalSync('PAYMENT_DELETED', { id: paymentId });
+  return data;
+}
+
 export async function dbClearAll() {
   const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
   if (ADMIN_SECRET) {

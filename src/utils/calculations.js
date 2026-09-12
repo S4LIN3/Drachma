@@ -62,12 +62,14 @@ export const calculateDailyTotals = (dateStr, mealTrackerEntries = [], expenses 
         const item = itemMap.get(itemId);
         if (item && isItemActiveOnDate(item, dateStr)) {
           const price = getItemPriceForDate(item, dateStr);
+          const isPaid = !!(mealRecord?.mealsPaid?.[item.id]?.paid || mealRecord?.mealsPaid?.[item.id] === true);
           dailyMealTotal += price;
           markedItemsDetails.push({
             id: item.id,
             name: item.name,
             icon: item.icon || '🍽️',
             price,
+            isPaid,
           });
         }
       }
@@ -160,8 +162,12 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
   const itemMap = new Map(recurringItems.map(item => [item.id, item]));
   
   let monthlyMealTotal = 0;
+  let paidMealTotal = 0;
+  let unpaidMealTotal = 0;
   let mealDaysCount = 0;
   let totalMealsMarkedCount = 0;
+  let paidMealsCount = 0;
+  let unpaidMealsCount = 0;
   const mealTypeTotals = {};
   
   for (const entry of monthMealEntries) {
@@ -172,9 +178,19 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
           const item = itemMap.get(itemId);
           if (item && isItemActiveOnDate(item, entry.date)) {
             const price = getItemPriceForDate(item, entry.date);
+            const isPaid = !!(entry.mealsPaid?.[itemId]?.paid || entry.mealsPaid?.[itemId] === true);
+
             monthlyMealTotal += price;
             totalMealsMarkedCount += 1;
             dayHasMeal = true;
+
+            if (isPaid) {
+              paidMealTotal += price;
+              paidMealsCount += 1;
+            } else {
+              unpaidMealTotal += price;
+              unpaidMealsCount += 1;
+            }
             
             mealTypeTotals[item.name] = (mealTypeTotals[item.name] || 0) + price;
           }
@@ -227,6 +243,10 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
     monthKey,
     daysInMonth,
     monthlyMealTotal,
+    paidMealTotal,
+    unpaidMealTotal,
+    paidMealsCount,
+    unpaidMealsCount,
     monthlyMiscTotal,
     monthlyOverallTotal,
     averageDailyExpense: Number(averageDailyExpense.toFixed(2)),
@@ -238,4 +258,74 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
     expensesCount: monthExpenses.length,
     budgetStats,
   };
+};
+
+/**
+ * Calculates unpaid meals count and total amount for a recurring item up to a specific paidTillDate.
+ * Enforces historical pricing per date.
+ */
+export const calculateUnpaidMealsAndAmount = (recurringItemId, paidTillDate, mealTracker = [], recurringItems = []) => {
+  if (!recurringItemId || !paidTillDate) {
+    return { unpaidStartDate: null, paidTillDate, eligibleMeals: [], totalAmount: 0, mealCount: 0 };
+  }
+
+  const item = recurringItems.find((i) => i.id === recurringItemId);
+
+  // Find all entries with marked and unpaid meals for this item
+  const unpaidEntries = mealTracker
+    .filter((entry) => {
+      const isMarked = !!entry.mealsMarked?.[recurringItemId];
+      const isPaid = !!(entry.mealsPaid?.[recurringItemId]?.paid || entry.mealsPaid?.[recurringItemId] === true);
+      return isMarked && !isPaid;
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (unpaidEntries.length === 0) {
+    return { unpaidStartDate: null, paidTillDate, eligibleMeals: [], totalAmount: 0, mealCount: 0 };
+  }
+
+  const eligibleMeals = unpaidEntries.filter((e) => e.date <= paidTillDate);
+
+  if (eligibleMeals.length === 0) {
+    return { unpaidStartDate: null, paidTillDate, eligibleMeals: [], totalAmount: 0, mealCount: 0 };
+  }
+
+  const unpaidStartDate = eligibleMeals[0].date;
+  const totalAmount = eligibleMeals.reduce((sum, entry) => {
+    const price = getItemPriceForDate(item, entry.date);
+    return sum + price;
+  }, 0);
+
+  return {
+    unpaidStartDate,
+    paidTillDate,
+    eligibleMeals,
+    totalAmount,
+    mealCount: eligibleMeals.length,
+  };
+};
+
+/**
+ * Calculates the latest date through which all marked meals for a recurring item are continuously paid.
+ */
+export const getPaidTillDate = (recurringItemId, mealTracker = []) => {
+  if (!recurringItemId) return null;
+
+  const markedEntries = mealTracker
+    .filter((entry) => !!entry.mealsMarked?.[recurringItemId])
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (markedEntries.length === 0) return null;
+
+  let latestPaidDate = null;
+  for (const entry of markedEntries) {
+    const isPaid = !!(entry.mealsPaid?.[recurringItemId]?.paid || entry.mealsPaid?.[recurringItemId] === true);
+    if (isPaid) {
+      latestPaidDate = entry.date;
+    } else {
+      break; // Stop at first unpaid meal
+    }
+  }
+
+  return latestPaidDate;
 };

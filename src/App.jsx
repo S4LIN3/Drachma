@@ -7,6 +7,7 @@ import { SummaryCards } from './components/SummaryCards';
 import { SmartQuickInputBar } from './components/SmartQuickInputBar';
 import { BudgetingModal } from './components/BudgetingModal';
 import { ReceiptLightboxModal } from './components/ReceiptLightboxModal';
+import { LunchPaymentModal } from './components/Modals/LunchPaymentModal';
 import { Calendar } from './components/Calendar';
 import { DailyPanel } from './components/DailyPanel';
 import { MobileQuickEntryView } from './components/MobileQuickEntryView';
@@ -32,6 +33,7 @@ export function App() {
     mealTracker,
     expenses,
     budgets,
+    payments,
     settings,
     monthlyStats,
     selectedDateStats,
@@ -50,6 +52,8 @@ export function App() {
     deleteMultipleExpenses,
     batchUpdateCategory,
     saveBudget,
+    markMealsAsPaid,
+    deletePayment,
     updateSettings,
     exportData,
     importData,
@@ -78,9 +82,16 @@ export function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBudgetModalOpen, setIsBudgetModalOpen] = useState(false);
   const [isMobileDailyModalOpen, setIsMobileDailyModalOpen] = useState(false);
+  const [isLunchPaymentModalOpen, setIsLunchPaymentModalOpen] = useState(false);
+  const [selectedPaymentItemId, setSelectedPaymentItemId] = useState(null);
 
   // Lightbox modal state for receipts
   const [lightboxImage, setLightboxImage] = useState(null);
+
+  const handleOpenMarkAsPaid = (recurringItemId = null) => {
+    setSelectedPaymentItemId(recurringItemId);
+    setIsLunchPaymentModalOpen(true);
+  };
 
   // Confirmation Modal state
   const [confirmConfig, setConfirmConfig] = useState({
@@ -278,6 +289,7 @@ export function App() {
         onOpenMonthPicker={() => setIsMonthPickerOpen(true)}
         onOpenAddExpense={() => handleOpenAddExpense()}
         onOpenRecurringPanel={() => setIsRecurringPanelOpen(true)}
+        onOpenMarkAsPaid={(itemId) => handleOpenMarkAsPaid(itemId)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         activeView={activeView}
         setActiveView={setActiveView}
@@ -426,12 +438,26 @@ export function App() {
       <RecurringItemsPanel
         isOpen={isRecurringPanelOpen}
         recurringItems={recurringItems}
+        mealTracker={mealTracker}
         currency={settings.currency || 'INR'}
         onClose={() => setIsRecurringPanelOpen(false)}
         onAdd={addRecurringItem}
         onUpdate={updateRecurringItem}
         onToggleActive={toggleRecurringItemActive}
         onDeleteRequest={handleDeleteRecurringItemRequest}
+        onOpenMarkAsPaid={(itemId) => handleOpenMarkAsPaid(itemId)}
+      />
+
+      <LunchPaymentModal
+        isOpen={isLunchPaymentModalOpen}
+        recurringItems={recurringItems}
+        mealTracker={mealTracker}
+        payments={payments}
+        currency={settings.currency || 'INR'}
+        defaultItemId={selectedPaymentItemId}
+        onClose={() => setIsLunchPaymentModalOpen(false)}
+        onMarkAsPaid={markMealsAsPaid}
+        onDeletePayment={deletePayment}
       />
 
       <MonthPickerModal

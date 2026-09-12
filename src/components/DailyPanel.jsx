@@ -112,7 +112,10 @@ export const DailyPanel = ({
           ) : (
             <div className="space-y-1.5">
               {activeRecurringItems.map((item) => {
-                const isMarked = markedItemIds.has(item.id);
+                const markedDetail = markedItems.find(m => m.id === item.id);
+                const isMarked = !!markedDetail;
+                const isPaid = markedDetail?.isPaid;
+
                 return (
                   <button
                     key={item.id}
@@ -122,7 +125,9 @@ export const DailyPanel = ({
                     onClick={() => onToggleMeal(selectedDate, item.id)}
                     className={`w-full flex items-center justify-between p-2.5 rounded-xl border transition-colors select-none text-left ${
                       isMarked
-                        ? 'bg-emerald-50/60 dark:bg-emerald-950/30 border-emerald-200/90 dark:border-emerald-800/80 shadow-2xs'
+                        ? isPaid
+                          ? 'bg-emerald-50/70 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 shadow-2xs'
+                          : 'bg-amber-50/70 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800/80 shadow-2xs'
                         : 'bg-white dark:bg-neutral-850/40 border-neutral-200/70 dark:border-neutral-800 hover:border-neutral-300'
                     }`}
                   >
@@ -130,7 +135,9 @@ export const DailyPanel = ({
                       <div
                         className={`w-4.5 h-4.5 rounded-md flex items-center justify-center border shrink-0 transition-colors ${
                           isMarked
-                            ? 'bg-emerald-600 border-emerald-600 text-white'
+                            ? isPaid
+                              ? 'bg-emerald-600 border-emerald-600 text-white'
+                              : 'bg-amber-500 border-amber-500 text-white'
                             : 'border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800'
                         }`}
                       >
@@ -142,9 +149,22 @@ export const DailyPanel = ({
                       </span>
                     </div>
 
-                    <span className="text-xs font-bold text-neutral-700 dark:text-neutral-300 shrink-0 ml-2">
-                      {formatCurrency(item.pricePerOccurrence, currency)}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0 ml-2">
+                      {isMarked && (
+                        <span
+                          className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                            isPaid
+                              ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                              : 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
+                          }`}
+                        >
+                          {isPaid ? '🟢 Paid' : '🟡 Unpaid'}
+                        </span>
+                      )}
+                      <span className="text-xs font-bold text-neutral-700 dark:text-neutral-300">
+                        {formatCurrency(item.pricePerOccurrence, currency)}
+                      </span>
+                    </div>
                   </button>
                 );
               })}

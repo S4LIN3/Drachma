@@ -600,6 +600,7 @@ export async function handleApiRequest(req, res, next) {
         { sql: 'DELETE FROM expenses', args: [] },
         { sql: 'DELETE FROM recurring_items', args: [] },
         { sql: 'DELETE FROM budgets', args: [] },
+        { sql: 'DELETE FROM payments', args: [] },
       ], 'write');
 
       broadcastEvent('DATA_CLEARED', {});
@@ -607,6 +608,173 @@ export async function handleApiRequest(req, res, next) {
     } catch (err) {
       console.error('Error clearing data:', err);
       return sendJson(res, 500, { success: false, error: 'Failed to clear data' });
+    }
+  }
+
+  // 16. POST /payments/mark-paid
+  if (path === '/payments/mark-paid' && method === 'POST') {
+    try {
+      const body = await parseJsonBody(req, res);
+      const recurringItemId = sanitizeInput(body.recurringItemId, 100);
+      const paidTillDate = sanitizeInput(body.paidTillDate, 10);
+      const notes = sanitizeInput(body.notes, 1000);
+
+      if (!isValidId(recurringItemId) || !isValidDate(paidTillDate)) {
+        return sendJson(res, 400, { success: false, error: 'Valid recurringItemId and paidTillDate (YYYY-MM-DD) required' });
+      }
+
+      const recRes = await db.execute({
+        sql: 'SELECT * FROM recurring_items WHERE id = ?',
+        args: [recurringItemId],
+      });
+      const itemRow = recRes.rows[0];
+      if (!itemRow) {
+        return sendJson(res, 404, { success: false, error: 'Recurring item not found' });
+      }
+
+      const mealRes = await db.execute({
+        sql: 'SELECT * FROM meal_tracker ORDER BY date ASC',
+        args: [],
+      });
+
+      const eligibleEntries = [];
+      for (const row of mealRes.rows) {
+        const date = String(row.date);
+        if (date > paidTillDate) continue;
+
+        const mealsMarked = row.meals_marked ? JSON.parse(String(row.meals_marked)) : {};
+        const mealsPaid = row.meals_paid ? JSON.parse(String(row.meals_paid)) : {};
+
+        const isMarked = !!mealsMarked[recurringItemId];
+        const isPaid = !!(mealsPaid[recurringItemId]?.paid || mealsPaid[recurringItemId] === true);
+
+        if (isMarked && !isPaid) {
+          eligibleEntries.push({
+            id: String(row.id),
+            date,
+            mealsMarked,
+            mealsPaid,
+          });
+        }
+      }
+
+      if (eligibleEntries.length === 0) {
+        return sendJson(res, 400, { success: false, error: 'No unpaid meal records found through the selected Paid Till date' });
+      }
+
+      const unpaidStartDate = eligibleEntries[0].date;
+      const mealCount = eligibleEntries.length;
+      const now = new Date().toISOString();
+      const todayDateStr = now.slice(0, 10);
+      const paymentId = `pay-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
+      // Calculate historical total price
+      const priceHistory = itemRow.price_history ? JSON.parse(String(itemRow.price_history)) : [];
+      let totalAmount = 0;
+      for (const entry of eligibleEntries) {
+        let price = Number(itemRow.price_per_occurrence) || 0;
+        if (Array.isArray(priceHistory) && priceHistory.length > 0) {
+          const sorted = [...priceHistory].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+          const applicable = sorted.find((p) => p.effectiveFrom <= entry.date);
+          if (applicable && typeof applicable.price === 'number') {
+            price = applicable.price;
+          }
+        }
+        totalAmount += price;
+      }
+
+      const statements = [];
+      for (const entry of eligibleEntries) {
+        const updatedMealsPaid = {
+          ...entry.mealsPaid,
+          [recurringItemId]: { paid: true, paymentId, paidAt: now },
+        };
+        statements.push({
+          sql: 'UPDATE meal_tracker SET meals_paid = ?, updated_at = ? WHERE id = ?',
+          args: [JSON.stringify(updatedMealsPaid), now, entry.id],
+        });
+      }
+
+      statements.push({
+        sql: `INSERT INTO payments (id, recurring_item_id, start_date, paid_till_date, meal_count, total_amount, payment_date, notes, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [paymentId, recurringItemId, unpaidStartDate, paidTillDate, mealCount, totalAmount, todayDateStr, notes, now, now],
+      });
+
+      await db.batch(statements, 'write');
+
+      const newPayment = {
+        id: paymentId,
+        recurringItemId,
+        startDate: unpaidStartDate,
+        paidTillDate,
+        mealCount,
+        totalAmount,
+        paymentDate: todayDateStr,
+        notes,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      broadcastEvent('MEAL_PAID', newPayment);
+      return sendJson(res, 200, { success: true, data: newPayment });
+    } catch (err) {
+      if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
+      if (err.message === 'INVALID_JSON') return sendJson(res, 400, { success: false, error: 'Malformed JSON payload' });
+      console.error('Error in /payments/mark-paid:', err);
+      return sendJson(res, 500, { success: false, error: 'Failed to record meal payment' });
+    }
+  }
+
+  // 17. DELETE /payments/:id
+  const deletePaymentMatch = path.match(/^\/payments\/([a-zA-Z0-9_-]{1,100})$/);
+  if (deletePaymentMatch && method === 'DELETE') {
+    try {
+      const paymentId = deletePaymentMatch[1];
+      const payRes = await db.execute({
+        sql: 'SELECT * FROM payments WHERE id = ?',
+        args: [paymentId],
+      });
+      const paymentRow = payRes.rows[0];
+      if (!paymentRow) {
+        return sendJson(res, 404, { success: false, error: 'Payment record not found' });
+      }
+
+      const recId = String(paymentRow.recurring_item_id);
+      const startDate = String(paymentRow.start_date);
+      const paidTillDate = String(paymentRow.paid_till_date);
+
+      const mealRes = await db.execute({
+        sql: 'SELECT * FROM meal_tracker WHERE date >= ? AND date <= ?',
+        args: [startDate, paidTillDate],
+      });
+
+      const now = new Date().toISOString();
+      const statements = [];
+
+      for (const row of mealRes.rows) {
+        const mealsPaid = row.meals_paid ? JSON.parse(String(row.meals_paid)) : {};
+        if (recId in mealsPaid) {
+          delete mealsPaid[recId];
+          statements.push({
+            sql: 'UPDATE meal_tracker SET meals_paid = ?, updated_at = ? WHERE id = ?',
+            args: [JSON.stringify(mealsPaid), now, String(row.id)],
+          });
+        }
+      }
+
+      statements.push({
+        sql: 'DELETE FROM payments WHERE id = ?',
+        args: [paymentId],
+      });
+
+      await db.batch(statements, 'write');
+
+      broadcastEvent('PAYMENT_DELETED', { id: paymentId });
+      return sendJson(res, 200, { success: true, data: { id: paymentId } });
+    } catch (err) {
+      console.error('Error deleting payment:', err);
+      return sendJson(res, 500, { success: false, error: 'Failed to revert payment record' });
     }
   }
 

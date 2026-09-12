@@ -130,18 +130,26 @@ export const Calendar = ({
               {/* Middle Section: Marked Meal Tags & Misc Expenses */}
               <div className="my-1.5 flex flex-col gap-1 min-w-0">
                 
-                {/* 1. Marked Meals Tags (Subtle Green) */}
+                {/* 1. Marked Meals Tags (Paid vs Unpaid badges) */}
                 {hasMeals ? (
                   <div className="flex flex-wrap gap-1 items-center">
                     {stats.markedItems.map((item) => (
                       <span
                         key={item.id}
-                        title={`${item.name} (${formatCurrency(item.price, currency)})`}
-                        className="inline-flex items-center gap-1 h-[23px] px-2 rounded-md text-[11px] font-medium bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border border-emerald-200/70 dark:border-emerald-800/60 truncate max-w-full"
+                        title={`${item.name} (${formatCurrency(item.price, currency)}) - ${item.isPaid ? 'Paid' : 'Unpaid'}`}
+                        className={`inline-flex items-center gap-1 h-[23px] px-1.5 rounded-md text-[11px] font-medium truncate max-w-full ${
+                          item.isPaid
+                            ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800'
+                            : 'bg-amber-50/90 dark:bg-amber-950/40 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-800/70'
+                        }`}
                       >
                         <span className="text-xs shrink-0">{item.icon || '🍽️'}</span>
                         <span className="truncate">{item.name}</span>
-                        <Check className="w-2.5 h-2.5 text-emerald-700 dark:text-emerald-400 shrink-0 stroke-[2.5]" />
+                        {item.isPaid ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" title="Paid" />
+                        ) : (
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="Unpaid" />
+                        )}
                       </span>
                     ))}
                   </div>

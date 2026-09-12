@@ -14,7 +14,8 @@ import {
   FileSpreadsheet,
   FileText,
   Database,
-  Smartphone
+  Smartphone,
+  Receipt
 } from 'lucide-react';
 import { formatMonthTitle } from '../utils/dateHelpers';
 
@@ -26,6 +27,7 @@ export const Header = ({
   onOpenMonthPicker,
   onOpenAddExpense,
   onOpenRecurringPanel,
+  onOpenMarkAsPaid,
   onOpenSettings,
   activeView,
   setActiveView,
@@ -156,6 +158,18 @@ export const Header = ({
                 Analytics
               </button>
             </nav>
+
+            {/* Mark as Paid Action Button */}
+            {onOpenMarkAsPaid && (
+              <button
+                onClick={() => onOpenMarkAsPaid()}
+                className="hidden xl:flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800 hover:bg-emerald-100 rounded-xl transition-colors shadow-2xs"
+                title="Mark lunch/meal charges as paid"
+              >
+                <Receipt className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                <span>Mark as Paid</span>
+              </button>
+            )}
 
             {/* Meals Config */}
             <button
