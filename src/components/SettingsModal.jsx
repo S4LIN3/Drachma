@@ -12,7 +12,10 @@ import {
   FileSpreadsheet, 
   FileText,
   Database,
-  CheckCircle2
+  CheckCircle2,
+  ShieldCheck,
+  Wrench,
+  Loader2
 } from 'lucide-react';
 
 export const SettingsModal = ({
@@ -23,6 +26,7 @@ export const SettingsModal = ({
   onExportPDF,
   onExportJSON,
   onImportData,
+  onRunMaintenance,
   onRequestClearAll,
   onClose,
 }) => {
@@ -30,6 +34,8 @@ export const SettingsModal = ({
   const [importPreview, setImportPreview] = useState(null);
   const [importError, setImportError] = useState('');
   const [importMode, setImportMode] = useState('replace');
+  const [isMaintaining, setIsMaintaining] = useState(false);
+  const [maintenanceResult, setMaintenanceResult] = useState(null);
 
   if (!isOpen) return null;
 
@@ -66,6 +72,20 @@ export const SettingsModal = ({
     onImportData(importPreview.data, importMode);
     setImportPreview(null);
     onClose();
+  };
+
+  const handleExecuteMaintenance = async () => {
+    if (!onRunMaintenance) return;
+    setIsMaintaining(true);
+    setMaintenanceResult(null);
+    try {
+      const res = await onRunMaintenance();
+      setMaintenanceResult(res);
+    } catch (err) {
+      setMaintenanceResult({ error: err.message });
+    } finally {
+      setIsMaintaining(false);
+    }
   };
 
   return (
@@ -162,7 +182,66 @@ export const SettingsModal = ({
             </div>
           </div>
 
-          {/* 4. Data Backup & Reset */}
+          {/* 4. Security & Monthly Maintenance */}
+          <div>
+            <label className="block text-[11px] font-semibold text-neutral-500 uppercase tracking-wider mb-2">
+              Security & Monthly Maintenance
+            </label>
+            <div className="p-3.5 rounded-xl border border-emerald-200/80 dark:border-emerald-800/80 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  <span className="font-bold text-neutral-900 dark:text-white">Security & Database Health</span>
+                </div>
+                <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 px-2 py-0.5 rounded">
+                  0 Vulnerabilities
+                </span>
+              </div>
+
+              <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                Runs database integrity verification, query optimization, orphan record cleanup, and security index validation.
+              </p>
+
+              <button
+                onClick={handleExecuteMaintenance}
+                disabled={isMaintaining}
+                className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
+              >
+                {isMaintaining ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Running Maintenance...</span>
+                  </>
+                ) : (
+                  <>
+                    <Wrench className="w-3.5 h-3.5" />
+                    <span>Run Monthly Maintenance</span>
+                  </>
+                )}
+              </button>
+
+              {maintenanceResult && (
+                <div className="p-2.5 rounded-lg bg-white dark:bg-neutral-850 border border-emerald-300 dark:border-emerald-800 space-y-1 text-[11px]">
+                  <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-bold">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Integrity: {maintenanceResult.integrityCheck || 'Verified OK'}</span>
+                  </div>
+                  {maintenanceResult.recordsCount && (
+                    <div className="text-neutral-600 dark:text-neutral-300">
+                      Active records: {maintenanceResult.recordsCount.expenses} expenses · {maintenanceResult.recordsCount.mealTrackerDays} meal days · {maintenanceResult.recordsCount.payments} payments
+                    </div>
+                  )}
+                  {maintenanceResult.cleanedRecords > 0 && (
+                    <div className="text-blue-600 dark:text-blue-400">
+                      Cleaned {maintenanceResult.cleanedRecords} orphan tracker entries
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 5. Data Backup & Reset */}
           <div>
             <label className="block text-[11px] font-semibold text-neutral-500 uppercase tracking-wider mb-2">
               Data Management

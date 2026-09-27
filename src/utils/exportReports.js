@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { formatMonthTitle, formatDateDisplay, getDayOfWeekName, getDaysInMonth, parseMonthKey } from './dateHelpers';
@@ -53,7 +53,7 @@ const formatTableDate = (dateStr) => {
 /**
  * Generates and downloads a multi-sheet Excel (.xlsx) workbook for the selected month.
  */
-export const exportMonthToExcel = ({
+export const exportMonthToExcel = async ({
   selectedMonth,
   monthlyStats,
   mealTracker = [],
@@ -67,49 +67,64 @@ export const exportMonthToExcel = ({
   const daysInMonth = getDaysInMonth(year, monthIndex);
   const monthPrefix = selectedMonth;
 
-  const wb = XLSX.utils.book_new();
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Drachma Expense Tracker';
+  workbook.created = new Date();
 
   // ----------------------------------------------------
   // 1. Sheet: Summary
   // ----------------------------------------------------
-  const summaryData = [
-    ['MONTHLY FINANCIAL EXPENSE REPORT', ''],
-    ['Report Period', monthTitle],
-    ['Generated On', formatReportDate(new Date().toISOString().slice(0, 10))],
-    ['Currency', `${currency} (${currencySymbol})`],
-    ['', ''],
-    ['KEY FINANCIAL METRICS', 'AMOUNT / STAT'],
-    ['Total Monthly Expenses', `${currencySymbol} ${monthlyStats.monthlyOverallTotal}`],
-    ['Recurring Meal Expenses', `${currencySymbol} ${monthlyStats.monthlyMealTotal}`],
-    ['Miscellaneous Expenses', `${currencySymbol} ${monthlyStats.monthlyMiscTotal}`],
-    ['Average Daily Expense', `${currencySymbol} ${monthlyStats.averageDailyExpense}`],
-    ['Meal Tracking Days', `${monthlyStats.mealDaysCount} / ${daysInMonth} days`],
-    ['Total Meal Portions Marked', monthlyStats.totalMealsMarkedCount],
-    ['Total Miscellaneous Transactions', monthlyStats.expensesCount],
-    ['', ''],
-    ['CATEGORY-WISE BREAKDOWN', 'AMOUNT', 'SHARE (%)', 'TRANSACTIONS'],
+  const wsSummary = workbook.addWorksheet('Summary');
+  wsSummary.columns = [
+    { width: 34 },
+    { width: 24 },
+    { width: 16 },
+    { width: 16 },
   ];
+
+  wsSummary.addRow(['MONTHLY FINANCIAL EXPENSE REPORT', '']);
+  wsSummary.addRow(['Report Period', monthTitle]);
+  wsSummary.addRow(['Generated On', formatReportDate(new Date().toISOString().slice(0, 10))]);
+  wsSummary.addRow(['Currency', `${currency} (${currencySymbol})`]);
+  wsSummary.addRow(['', '']);
+  wsSummary.addRow(['KEY FINANCIAL METRICS', 'AMOUNT / STAT']);
+  wsSummary.addRow(['Total Monthly Expenses', `${currencySymbol} ${monthlyStats.monthlyOverallTotal}`]);
+  wsSummary.addRow(['Recurring Meal Expenses', `${currencySymbol} ${monthlyStats.monthlyMealTotal}`]);
+  wsSummary.addRow(['Paid Meal Expenses', `${currencySymbol} ${monthlyStats.paidMealTotal || 0}`]);
+  wsSummary.addRow(['Unpaid Meal Expenses Due', `${currencySymbol} ${monthlyStats.unpaidMealTotal || 0}`]);
+  wsSummary.addRow(['Miscellaneous Expenses', `${currencySymbol} ${monthlyStats.monthlyMiscTotal}`]);
+  wsSummary.addRow(['Average Daily Expense', `${currencySymbol} ${monthlyStats.averageDailyExpense}`]);
+  wsSummary.addRow(['Meal Tracking Days', `${monthlyStats.mealDaysCount} / ${daysInMonth} days`]);
+  wsSummary.addRow(['Total Meal Portions Marked', monthlyStats.totalMealsMarkedCount]);
+  wsSummary.addRow(['Total Miscellaneous Transactions', monthlyStats.expensesCount]);
+  wsSummary.addRow(['', '']);
+  wsSummary.addRow(['CATEGORY-WISE BREAKDOWN', 'AMOUNT', 'SHARE (%)', 'TRANSACTIONS']);
 
   (monthlyStats.categoryBreakdown || []).forEach(cat => {
     const meta = getCategoryMeta(cat.categoryId);
-    summaryData.push([meta.label, `${currencySymbol} ${cat.amount}`, `${cat.percentage}%`, cat.count]);
+    wsSummary.addRow([meta.label, `${currencySymbol} ${cat.amount}`, `${cat.percentage}%`, cat.count]);
   });
 
-  summaryData.push(['', '']);
-  summaryData.push(['RECURRING MEALS SUMMARY', 'TOTAL AMOUNT']);
+  wsSummary.addRow(['', '']);
+  wsSummary.addRow(['RECURRING MEALS SUMMARY', 'TOTAL AMOUNT']);
   Object.entries(monthlyStats.mealTypeTotals || {}).forEach(([name, amount]) => {
-    summaryData.push([name, `${currencySymbol} ${amount}`]);
+    wsSummary.addRow([name, `${currencySymbol} ${amount}`]);
   });
-
-  const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
-  wsSummary['!cols'] = [{ wch: 32 }, { wch: 22 }, { wch: 15 }, { wch: 15 }];
-  XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
 
   // ----------------------------------------------------
   // 2. Sheet: Daily Breakdown
   // ----------------------------------------------------
-  const dailyHeaders = ['Date', 'Day', 'Meals Marked', 'Meal Cost', 'Misc Count', 'Misc Cost', 'Daily Total', 'Notes'];
-  const dailyRows = [];
+  const wsDaily = workbook.addWorksheet('Daily Log');
+  wsDaily.columns = [
+    { header: 'Date', key: 'date', width: 18 },
+    { header: 'Day', key: 'day', width: 14 },
+    { header: 'Meals Marked', key: 'meals', width: 34 },
+    { header: 'Meal Cost', key: 'mealCost', width: 14 },
+    { header: 'Misc Count', key: 'miscCount', width: 12 },
+    { header: 'Misc Cost', key: 'miscCost', width: 14 },
+    { header: 'Daily Total', key: 'dailyTotal', width: 14 },
+    { header: 'Notes', key: 'notes', width: 28 },
+  ];
 
   for (let d = 1; d <= daysInMonth; d++) {
     const dStr = String(d).padStart(2, '0');
@@ -123,24 +138,18 @@ export const exportMonthToExcel = ({
       notes: '',
     };
 
-    const mealNames = dayData.markedItems.map(m => m.name).join(' · ') || '—';
-    dailyRows.push([
-      formatReportDate(dateStr),
-      getDayOfWeekName(dateStr),
-      mealNames,
-      dayData.dailyMealTotal,
-      dayData.expenses.length,
-      dayData.dailyMiscTotal,
-      dayData.dailyOverallTotal,
-      dayData.notes || '',
-    ]);
+    const mealNames = dayData.markedItems.map(m => `${m.name}${m.isPaid ? ' (Paid)' : ' (Unpaid)'}`).join(' · ') || '—';
+    wsDaily.addRow({
+      date: formatReportDate(dateStr),
+      day: getDayOfWeekName(dateStr),
+      meals: mealNames,
+      mealCost: dayData.dailyMealTotal,
+      miscCount: dayData.expenses.length,
+      miscCost: dayData.dailyMiscTotal,
+      dailyTotal: dayData.dailyOverallTotal,
+      notes: dayData.notes || '',
+    });
   }
-
-  const wsDaily = XLSX.utils.aoa_to_sheet([dailyHeaders, ...dailyRows]);
-  wsDaily['!cols'] = [
-    { wch: 16 }, { wch: 12 }, { wch: 32 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 25 }
-  ];
-  XLSX.utils.book_append_sheet(wb, wsDaily, 'Daily Log');
 
   // ----------------------------------------------------
   // 3. Sheet: Miscellaneous Expenses List
@@ -149,29 +158,41 @@ export const exportMonthToExcel = ({
     exp.month === selectedMonth || (exp.date && exp.date.startsWith(monthPrefix))
   ).sort((a, b) => a.date.localeCompare(b.date));
 
-  const miscHeaders = ['Date', 'Description', 'Category', 'Unit Price', 'Quantity', 'Total Amount', 'Notes'];
-  const miscRows = monthExpenses.map(exp => {
+  const wsMisc = workbook.addWorksheet('Misc Transactions');
+  wsMisc.columns = [
+    { header: 'Date', key: 'date', width: 18 },
+    { header: 'Description', key: 'desc', width: 32 },
+    { header: 'Category', key: 'cat', width: 18 },
+    { header: 'Unit Price', key: 'unitPrice', width: 14 },
+    { header: 'Quantity', key: 'qty', width: 12 },
+    { header: 'Total Amount', key: 'total', width: 16 },
+    { header: 'Notes', key: 'notes', width: 28 },
+  ];
+
+  monthExpenses.forEach(exp => {
     const meta = getCategoryMeta(exp.category);
-    return [
-      formatReportDate(exp.date),
-      exp.description,
-      meta.label,
-      exp.unitPrice,
-      exp.quantity || 1,
-      exp.totalAmount,
-      exp.notes || '',
-    ];
+    wsMisc.addRow({
+      date: formatReportDate(exp.date),
+      desc: exp.description,
+      cat: meta.label,
+      unitPrice: exp.unitPrice,
+      qty: exp.quantity || 1,
+      total: exp.totalAmount,
+      notes: exp.notes || '',
+    });
   });
 
-  const wsMisc = XLSX.utils.aoa_to_sheet([miscHeaders, ...miscRows]);
-  wsMisc['!cols'] = [
-    { wch: 16 }, { wch: 30 }, { wch: 18 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 25 }
-  ];
-  XLSX.utils.book_append_sheet(wb, wsMisc, 'Misc Transactions');
-
-  // Save workbook
-  const fileName = `Expense_Report_${selectedMonth}.xlsx`;
-  XLSX.writeFile(wb, fileName);
+  // Browser download
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Expense_Report_${selectedMonth}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
 };
 
 /**

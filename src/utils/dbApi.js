@@ -182,6 +182,17 @@ export async function dbDeletePayment(paymentId) {
   return data;
 }
 
+export async function dbRunMaintenance() {
+  const res = await fetch(`${API_BASE}/maintenance`, {
+    method: 'POST',
+    headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+  });
+  if (!res.ok) throw new Error('Failed to run database maintenance');
+  const json = await res.json();
+  notifyLocalSync('MAINTENANCE_COMPLETED', json.data);
+  return json.data;
+}
+
 export async function dbClearAll() {
   const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
   if (ADMIN_SECRET) {

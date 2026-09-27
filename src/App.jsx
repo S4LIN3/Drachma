@@ -54,6 +54,7 @@ export function App() {
     saveBudget,
     markMealsAsPaid,
     deletePayment,
+    runMaintenance,
     updateSettings,
     exportData,
     importData,
@@ -475,6 +476,7 @@ export function App() {
         onExportPDF={handleExportPDF}
         onExportJSON={exportData}
         onImportData={importData}
+        onRunMaintenance={runMaintenance}
         onRequestClearAll={handleClearAllRequest}
         onClose={() => setIsSettingsOpen(false)}
       />

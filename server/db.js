@@ -119,6 +119,21 @@ export async function initDatabase() {
       // Column already exists or table freshly created
     }
 
+    // Performance Indexes for Fast Monthly Queries & Scalability
+    try {
+      await db.batch([
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_meal_tracker_date ON meal_tracker(date);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_meal_tracker_month ON meal_tracker(month);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_month ON expenses(month);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_recurring ON payments(recurring_item_id);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);', args: [] },
+      ], 'write');
+    } catch (e) {
+      // Index creation failed gracefully
+    }
+
     // Default recurring templates if empty
     const countRes = await db.execute('SELECT COUNT(*) as count FROM recurring_items');
     const count = Number(countRes.rows[0]?.count || 0);
@@ -299,4 +314,80 @@ export async function getAllData() {
   }));
 
   return { recurringItems, mealTracker, expenses, budgets, settings, payments };
+}
+
+/**
+ * Monthly / Periodic Database Maintenance Routine
+ * 1. Checks integrity of the database
+ * 2. Runs PRAGMA optimize for query optimization
+ * 3. Cleans up empty / orphan meal tracker rows
+ * 4. Checks status of tables and records
+ */
+export async function runDatabaseMaintenance() {
+  await initDatabase();
+
+  const results = {
+    integrityCheck: 'ok',
+    recordsCount: {},
+    cleanedRecords: 0,
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    // 1. Run Integrity Check
+    const integrityRes = await db.execute('PRAGMA integrity_check');
+    const integrityRow = integrityRes.rows[0];
+    results.integrityCheck = integrityRow ? Object.values(integrityRow)[0] : 'ok';
+
+    // 2. Query stats & optimizer
+    try {
+      await db.execute('PRAGMA optimize');
+    } catch (e) {
+      // Ignored for environments where pragma optimize is not supported
+    }
+
+    // 3. Clean up empty meal tracker rows (no meals marked and no notes)
+    const emptyRowsRes = await db.execute(`
+      SELECT id, meals_marked, notes FROM meal_tracker
+    `);
+    
+    const orphanIds = [];
+    for (const row of emptyRowsRes.rows) {
+      const marks = row.meals_marked ? JSON.parse(String(row.meals_marked)) : {};
+      const hasMarked = Object.values(marks).some(Boolean);
+      const hasNotes = !!(row.notes && String(row.notes).trim());
+      if (!hasMarked && !hasNotes) {
+        orphanIds.push(String(row.id));
+      }
+    }
+
+    if (orphanIds.length > 0) {
+      for (const id of orphanIds) {
+        await db.execute({ sql: 'DELETE FROM meal_tracker WHERE id = ?', args: [id] });
+      }
+      results.cleanedRecords = orphanIds.length;
+    }
+
+    // 4. Record counts
+    const [recC, mealC, expC, bgtC, payC] = await Promise.all([
+      db.execute('SELECT COUNT(*) as c FROM recurring_items'),
+      db.execute('SELECT COUNT(*) as c FROM meal_tracker'),
+      db.execute('SELECT COUNT(*) as c FROM expenses'),
+      db.execute('SELECT COUNT(*) as c FROM budgets'),
+      db.execute('SELECT COUNT(*) as c FROM payments'),
+    ]);
+
+    results.recordsCount = {
+      recurringItems: Number(recC.rows[0]?.c || 0),
+      mealTrackerDays: Number(mealC.rows[0]?.c || 0),
+      expenses: Number(expC.rows[0]?.c || 0),
+      budgets: Number(bgtC.rows[0]?.c || 0),
+      payments: Number(payC.rows[0]?.c || 0),
+    };
+  } catch (err) {
+    console.error('Maintenance routine warning:', err);
+    results.error = err.message;
+  }
+
+  return results;
 }

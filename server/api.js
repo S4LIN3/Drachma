@@ -1,4 +1,4 @@
-import { db, initDatabase, getAllData } from './db.js';
+import { db, initDatabase, getAllData, runDatabaseMaintenance } from './db.js';
 
 // Connected SSE clients for real-time live sync
 const sseClients = new Set();
@@ -775,6 +775,18 @@ export async function handleApiRequest(req, res, next) {
     } catch (err) {
       console.error('Error deleting payment:', err);
       return sendJson(res, 500, { success: false, error: 'Failed to revert payment record' });
+    }
+  }
+
+  // 18. POST /maintenance (Monthly & Security Maintenance Routine)
+  if (path === '/maintenance' && method === 'POST') {
+    try {
+      const results = await runDatabaseMaintenance();
+      broadcastEvent('MAINTENANCE_COMPLETED', results);
+      return sendJson(res, 200, { success: true, data: results });
+    } catch (err) {
+      console.error('Maintenance error:', err);
+      return sendJson(res, 500, { success: false, error: 'Database maintenance encountered an issue' });
     }
   }
 

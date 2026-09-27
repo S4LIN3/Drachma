@@ -16,6 +16,7 @@ import {
   dbDeleteBudget,
   dbMarkMealsAsPaid,
   dbDeletePayment,
+  dbRunMaintenance,
   dbClearAll, 
   subscribeToDbSync 
 } from '../utils/dbApi';
@@ -550,6 +551,19 @@ export const useExpenseTracker = (addToast) => {
     }
   }, [addToast, reloadFromDb]);
 
+  const runMaintenance = useCallback(async () => {
+    try {
+      const results = await dbRunMaintenance();
+      await reloadFromDb();
+      if (addToast) addToast('Database maintenance & integrity check completed', 'success');
+      return results;
+    } catch (err) {
+      console.error('Maintenance execution failed:', err);
+      if (addToast) addToast('Failed to run database maintenance', 'error');
+      throw err;
+    }
+  }, [addToast, reloadFromDb]);
+
   return {
     isLoaded,
     selectedMonth,
@@ -581,6 +595,7 @@ export const useExpenseTracker = (addToast) => {
     saveBudget,
     markMealsAsPaid,
     deletePayment,
+    runMaintenance,
     updateSettings,
     exportData,
     importData,
