@@ -1,16 +1,20 @@
 /**
- * Frontend Database Client with Security Headers, BroadcastChannel and SSE Synchronization
- * Communicates with the persistent Database on the backend.
+ * Frontend Database Client with JWT auth, BroadcastChannel and SSE Synchronization.
+ * All requests automatically attach the JWT token from localStorage.
  */
 
 const API_BASE = '/api';
-const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || '';
-const ADMIN_SECRET = import.meta.env.VITE_ADMIN_SECRET || '';
+const AUTH_TOKEN_KEY = 'drachma_auth_token';
+
+function getAuthToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY) || '';
+}
 
 function getAuthHeaders(customHeaders = {}) {
   const headers = { ...customHeaders };
-  if (API_SECRET_KEY) {
-    headers['X-Api-Key'] = API_SECRET_KEY;
+  const token = getAuthToken();
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
   }
   return headers;
 }
@@ -24,17 +28,28 @@ function notifyLocalSync(eventType, payload) {
   if (syncChannel) {
     try {
       syncChannel.postMessage({ type: eventType, payload, timestamp: Date.now() });
-    } catch (err) {
-      // Ignore broadcast errors
-    }
+    } catch (_) {}
+  }
+}
+
+/**
+ * Handle 401 responses by dispatching an event for the app to redirect to login.
+ */
+function handleUnauthorized(res) {
+  if (res.status === 401 || res.status === 403) {
+    window.dispatchEvent(new CustomEvent('drachma:unauthorized'));
   }
 }
 
 export async function fetchDbData() {
-  const res = await fetch(`${API_BASE}/data`, { 
+  const res = await fetch(`${API_BASE}/data`, {
     headers: getAuthHeaders(),
-    cache: 'no-store' 
+    cache: 'no-store',
   });
+  if (res.status === 401 || res.status === 403) {
+    handleUnauthorized(res);
+    throw new Error('Unauthorized');
+  }
   if (!res.ok) throw new Error(`Failed to fetch database data: ${res.statusText}`);
   const json = await res.json();
   return json.data;
@@ -46,6 +61,7 @@ export async function dbToggleMeal(date, recurringItemId) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ date, recurringItemId }),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to toggle meal in database');
   const data = await res.json();
   notifyLocalSync('MEAL_TOGGLED', { date, recurringItemId });
@@ -58,6 +74,7 @@ export async function dbSaveMealNotes(date, notes) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ date, notes }),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to save notes in database');
   const data = await res.json();
   notifyLocalSync('NOTES_UPDATED', { date, notes });
@@ -70,6 +87,7 @@ export async function dbSaveExpense(expenseData) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(expenseData),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to save expense in database');
   const json = await res.json();
   notifyLocalSync('EXPENSE_SAVED', json.data);
@@ -81,6 +99,7 @@ export async function dbDeleteExpense(id) {
     method: 'DELETE',
     headers: getAuthHeaders(),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to delete expense in database');
   const data = await res.json();
   notifyLocalSync('EXPENSE_DELETED', { id });
@@ -93,6 +112,7 @@ export async function dbSaveRecurringItem(itemData) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(itemData),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to save recurring item in database');
   const data = await res.json();
   notifyLocalSync('RECURRING_SAVED', data);
@@ -104,6 +124,7 @@ export async function dbToggleRecurringActive(id) {
     method: 'PATCH',
     headers: getAuthHeaders(),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to toggle recurring item in database');
   const data = await res.json();
   notifyLocalSync('RECURRING_TOGGLED', { id });
@@ -115,6 +136,7 @@ export async function dbDeleteRecurringItem(id) {
     method: 'DELETE',
     headers: getAuthHeaders(),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to delete recurring item in database');
   const data = await res.json();
   notifyLocalSync('RECURRING_DELETED', { id });
@@ -127,6 +149,7 @@ export async function dbSaveSettings(settings) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(settings),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to save settings in database');
   const data = await res.json();
   notifyLocalSync('SETTINGS_UPDATED', settings);
@@ -139,6 +162,7 @@ export async function dbSaveBudget(budgetData) {
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(budgetData),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to save budget in database');
   const json = await res.json();
   notifyLocalSync('BUDGET_SAVED', json.data);
@@ -150,6 +174,7 @@ export async function dbDeleteBudget(id) {
     method: 'DELETE',
     headers: getAuthHeaders(),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to delete budget in database');
   const data = await res.json();
   notifyLocalSync('BUDGET_DELETED', { id });
@@ -162,6 +187,7 @@ export async function dbMarkMealsAsPaid({ recurringItemId, paidTillDate, notes }
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ recurringItemId, paidTillDate, notes }),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) {
     const errorJson = await res.json().catch(() => ({}));
     throw new Error(errorJson.error || 'Failed to mark meals as paid');
@@ -176,6 +202,7 @@ export async function dbDeletePayment(paymentId) {
     method: 'DELETE',
     headers: getAuthHeaders(),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to delete payment record');
   const data = await res.json();
   notifyLocalSync('PAYMENT_DELETED', { id: paymentId });
@@ -187,6 +214,7 @@ export async function dbRunMaintenance() {
     method: 'POST',
     headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to run database maintenance');
   const json = await res.json();
   notifyLocalSync('MAINTENANCE_COMPLETED', json.data);
@@ -195,19 +223,36 @@ export async function dbRunMaintenance() {
 
 export async function dbClearAll() {
   const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
-  if (ADMIN_SECRET) {
-    headers['X-Admin-Secret'] = ADMIN_SECRET;
-  }
+  const adminSecret = import.meta.env.VITE_ADMIN_SECRET;
+  if (adminSecret) headers['X-Admin-Secret'] = adminSecret;
 
   const res = await fetch(`${API_BASE}/clear`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ confirm: true }),
   });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
   if (!res.ok) throw new Error('Failed to clear database');
   const data = await res.json();
   notifyLocalSync('DATA_CLEARED', {});
   return data;
+}
+
+/**
+ * Fetch yearly report data from the API.
+ */
+export async function dbFetchYearlyReport(year) {
+  const res = await fetch(`${API_BASE}/reports/yearly?year=${year}`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+  if (res.status === 401) { handleUnauthorized(res); throw new Error('Unauthorized'); }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to fetch yearly report');
+  }
+  const json = await res.json();
+  return json.data;
 }
 
 /**
@@ -216,7 +261,6 @@ export async function dbClearAll() {
 export function subscribeToDbSync(onUpdateCallback) {
   let eventSource = null;
 
-  // 1. BroadcastChannel Listener (Instant local tab/PWA synchronization)
   const handleBroadcastMessage = (event) => {
     if (onUpdateCallback && event.data) {
       onUpdateCallback(event.data);
@@ -227,34 +271,31 @@ export function subscribeToDbSync(onUpdateCallback) {
     syncChannel.addEventListener('message', handleBroadcastMessage);
   }
 
-  // 2. SSE Listener (For long-lived server connection if supported)
   try {
-    eventSource = new EventSource(`${API_BASE}/sync/events`);
+    const token = getAuthToken();
+    // SSE requires token — attach via URL param as EventSource doesn't support custom headers
+    const sseUrl = token
+      ? `${API_BASE}/sync/events?_t=${encodeURIComponent(token)}`
+      : null;
 
-    eventSource.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data);
-        if (onUpdateCallback) {
-          onUpdateCallback(parsed);
-        }
-      } catch (err) {
-        console.error('Error parsing sync event:', err);
-      }
-    };
+    if (sseUrl) {
+      eventSource = new EventSource(sseUrl);
 
-    eventSource.onerror = () => {
-      // EventSource auto-retries
-    };
-  } catch (err) {
-    console.warn('SSE Sync not available in this environment:', err);
-  }
+      eventSource.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data);
+          if (onUpdateCallback) onUpdateCallback(parsed);
+        } catch (_) {}
+      };
+
+      eventSource.onerror = () => {
+        // EventSource auto-retries
+      };
+    }
+  } catch (_) {}
 
   return () => {
-    if (syncChannel) {
-      syncChannel.removeEventListener('message', handleBroadcastMessage);
-    }
-    if (eventSource) {
-      eventSource.close();
-    }
+    if (syncChannel) syncChannel.removeEventListener('message', handleBroadcastMessage);
+    if (eventSource) eventSource.close();
   };
 }

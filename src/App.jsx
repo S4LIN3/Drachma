@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { useToast } from './hooks/useToast';
 import { useExpenseTracker } from './hooks/useExpenseTracker';
 import { exportMonthToExcel, exportMonthToPDF } from './utils/exportReports';
+import { AuthPage } from './components/AuthPage';
 import { Header } from './components/Header';
 import { SummaryCards } from './components/SummaryCards';
 import { SmartQuickInputBar } from './components/SmartQuickInputBar';
@@ -19,10 +21,14 @@ import { ExpenseListView } from './components/ExpenseListView';
 import { SettingsModal } from './components/SettingsModal';
 import { ConfirmationModal } from './components/Modals/ConfirmationModal';
 import { ToastNotification } from './components/Modals/ToastNotification';
+import { UserProfileModal } from './components/UserProfileModal';
+import { YearlyReportModal } from './components/YearlyReportModal';
 
-export function App() {
+// ─── Inner app (requires authentication) ─────────────────────────────────────
+function AppInner() {
   const { toasts, addToast, removeToast } = useToast();
-  
+  const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
+
   const {
     isLoaded,
     selectedMonth,
@@ -61,11 +67,20 @@ export function App() {
     clearData,
   } = useExpenseTracker(addToast);
 
+  // Listen for unauthorized events (token expired) and log out
+  useEffect(() => {
+    const handle = () => {
+      addToast('Session expired. Please sign in again.', 'error');
+      logout();
+    };
+    window.addEventListener('drachma:unauthorized', handle);
+    return () => window.removeEventListener('drachma:unauthorized', handle);
+  }, [logout, addToast]);
+
   // UI view state
-  const [activeView, setActiveView] = useState('calendar'); // 'calendar' | 'list' | 'analytics'
+  const [activeView, setActiveView] = useState('calendar');
   const [isMobileQuickMode, setIsMobileQuickMode] = useState(false);
 
-  // Detect PWA standalone mode or small mobile viewport on initial load
   useEffect(() => {
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
     const isSmallScreen = window.innerWidth < 640;
@@ -85,16 +100,11 @@ export function App() {
   const [isMobileDailyModalOpen, setIsMobileDailyModalOpen] = useState(false);
   const [isLunchPaymentModalOpen, setIsLunchPaymentModalOpen] = useState(false);
   const [selectedPaymentItemId, setSelectedPaymentItemId] = useState(null);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isYearlyReportOpen, setIsYearlyReportOpen] = useState(false);
 
-  // Lightbox modal state for receipts
   const [lightboxImage, setLightboxImage] = useState(null);
 
-  const handleOpenMarkAsPaid = (recurringItemId = null) => {
-    setSelectedPaymentItemId(recurringItemId);
-    setIsLunchPaymentModalOpen(true);
-  };
-
-  // Confirmation Modal state
   const [confirmConfig, setConfirmConfig] = useState({
     isOpen: false,
     title: '',
@@ -103,16 +113,14 @@ export function App() {
     onConfirm: () => {},
   });
 
+  const handleOpenMarkAsPaid = (recurringItemId = null) => {
+    setSelectedPaymentItemId(recurringItemId);
+    setIsLunchPaymentModalOpen(true);
+  };
+
   const handleExportExcel = () => {
     try {
-      exportMonthToExcel({
-        selectedMonth,
-        monthlyStats,
-        mealTracker,
-        expenses,
-        recurringItems,
-        currency: settings.currency || 'INR',
-      });
+      exportMonthToExcel({ selectedMonth, monthlyStats, mealTracker, expenses, recurringItems, currency: settings.currency || 'INR' });
       addToast('Excel report downloaded', 'success');
     } catch (err) {
       console.error('Failed to export Excel:', err);
@@ -122,14 +130,7 @@ export function App() {
 
   const handleExportPDF = () => {
     try {
-      exportMonthToPDF({
-        selectedMonth,
-        monthlyStats,
-        mealTracker,
-        expenses,
-        recurringItems,
-        currency: settings.currency || 'INR',
-      });
+      exportMonthToPDF({ selectedMonth, monthlyStats, mealTracker, expenses, recurringItems, currency: settings.currency || 'INR' });
       addToast('PDF report downloaded', 'success');
     } catch (err) {
       console.error('Failed to export PDF:', err);
@@ -166,7 +167,7 @@ export function App() {
       isDestructive: true,
       onConfirm: () => {
         deleteExpense(expenseId);
-        setConfirmConfig(prev => ({ ...prev, isOpen: false }));
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
       },
     });
   };
@@ -194,7 +195,7 @@ export function App() {
       isDestructive: true,
       onConfirm: () => {
         deleteRecurringItem(item.id);
-        setConfirmConfig(prev => ({ ...prev, isOpen: false }));
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
       },
     });
   };
@@ -208,7 +209,7 @@ export function App() {
       isDestructive: true,
       onConfirm: () => {
         clearData();
-        setConfirmConfig(prev => ({ ...prev, isOpen: false }));
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
         setIsSettingsOpen(false);
       },
     });
@@ -230,6 +231,24 @@ export function App() {
     updateSettings({ theme: nextTheme });
   };
 
+  // ── Auth loading state ────────────────────────────────────────────────────
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#FAFAFB] dark:bg-[#0F1012]">
+        <div className="flex flex-col items-center gap-2">
+          <div className="w-8 h-8 border-2 border-neutral-400 border-t-neutral-800 dark:border-t-white rounded-full animate-spin" />
+          <p className="text-xs font-medium text-neutral-500">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unauthenticated — show login page ─────────────────────────────────────
+  if (!isAuthenticated) {
+    return <AuthPage />;
+  }
+
+  // ── Data loading state ────────────────────────────────────────────────────
   if (!isLoaded) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#FAFAFB] dark:bg-[#0F1012]">
@@ -241,7 +260,7 @@ export function App() {
     );
   }
 
-  // Dedicated Mobile PWA Quick Entry View
+  // ── Mobile PWA Quick Entry View ───────────────────────────────────────────
   if (isMobileQuickMode) {
     return (
       <>
@@ -266,18 +285,15 @@ export function App() {
           confirmText={confirmConfig.confirmText}
           isDestructive={confirmConfig.isDestructive}
           onConfirm={confirmConfig.onConfirm}
-          onCancel={() => setConfirmConfig(prev => ({ ...prev, isOpen: false }))}
+          onCancel={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
         />
 
-        <ToastNotification
-          toasts={toasts}
-          onDismiss={removeToast}
-        />
+        <ToastNotification toasts={toasts} onDismiss={removeToast} />
       </>
     );
   }
 
-  // Full Web Dashboard View
+  // ── Full Web Dashboard View ───────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col bg-[#FAFAFB] dark:bg-[#0F1012] text-neutral-900 dark:text-neutral-100 antialiased">
       
@@ -300,6 +316,8 @@ export function App() {
         onExportPDF={handleExportPDF}
         onExportJSON={exportData}
         onToggleMobileQuickMode={() => setIsMobileQuickMode(true)}
+        onOpenProfile={() => setIsProfileOpen(true)}
+        onOpenYearlyReport={() => setIsYearlyReportOpen(true)}
       />
 
       {/* Main Full-Screen Dynamic Container */}
@@ -481,6 +499,19 @@ export function App() {
         onClose={() => setIsSettingsOpen(false)}
       />
 
+      {/* New: User Profile Modal */}
+      <UserProfileModal
+        isOpen={isProfileOpen}
+        onClose={() => setIsProfileOpen(false)}
+      />
+
+      {/* New: Yearly Report Modal */}
+      <YearlyReportModal
+        isOpen={isYearlyReportOpen}
+        onClose={() => setIsYearlyReportOpen(false)}
+        currency={settings.currency || 'INR'}
+      />
+
       <ConfirmationModal
         isOpen={confirmConfig.isOpen}
         title={confirmConfig.title}
@@ -488,14 +519,19 @@ export function App() {
         confirmText={confirmConfig.confirmText}
         isDestructive={confirmConfig.isDestructive}
         onConfirm={confirmConfig.onConfirm}
-        onCancel={() => setConfirmConfig(prev => ({ ...prev, isOpen: false }))}
+        onCancel={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
       />
 
-      <ToastNotification
-        toasts={toasts}
-        onDismiss={removeToast}
-      />
-
+      <ToastNotification toasts={toasts} onDismiss={removeToast} />
     </div>
+  );
+}
+
+// ─── Root export with AuthProvider ───────────────────────────────────────────
+export function App() {
+  return (
+    <AuthProvider>
+      <AppInner />
+    </AuthProvider>
   );
 }

@@ -8,14 +8,18 @@
     "build": "node node_modules/vite/bin/vite.js build",
     "preview": "node node_modules/vite/bin/vite.js preview",
     "server": "node server/index.js",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "db:migrate": "node scripts/migrate.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
+    "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
+    "dotenv": "^18.0.5",
     "exceljs": "^4.4.0",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.475.0",

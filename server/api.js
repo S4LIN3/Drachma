@@ -1,20 +1,24 @@
-import { db, initDatabase, getAllData, runDatabaseMaintenance } from './db.js';
+import { db, initDatabase, getAllData, getYearlyData, runDatabaseMaintenance } from './db.js';
+import { hashPassword, verifyPassword, signToken, extractUserFromRequest } from './auth.js';
 
-// Connected SSE clients for real-time live sync
-const sseClients = new Set();
+// ─── SSE clients (keyed by userId for per-user broadcasts) ──────────────────
+const sseClients = new Map(); // userId -> Set<res>
 
-function broadcastEvent(eventType, payload) {
+function broadcastEvent(userId, eventType, payload) {
   const data = JSON.stringify({ type: eventType, payload, timestamp: Date.now() });
-  for (const client of sseClients) {
+  const clients = sseClients.get(userId);
+  if (!clients) return;
+  for (const client of clients) {
     try {
       client.write(`data: ${data}\n\n`);
-    } catch (err) {
-      sseClients.delete(client);
+    } catch (_) {
+      clients.delete(client);
     }
   }
 }
 
-// Standardized HTTP Helper with Bank-Grade Security Headers
+// ─── Security / utility helpers ──────────────────────────────────────────────
+
 function sendJson(res, statusCode, data) {
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json');
@@ -28,7 +32,6 @@ function sendJson(res, statusCode, data) {
   res.end(JSON.stringify(data));
 }
 
-// CORS Origin Handling
 function applyCorsHeaders(req, res) {
   const origin = req.headers['origin'];
   const allowedOrigin = process.env.ALLOWED_ORIGIN;
@@ -38,12 +41,12 @@ function applyCorsHeaders(req, res) {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     }
   } else if (origin) {
-    // In default development mode, mirror request origin securely
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, X-Admin-Secret');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Max-Age', '86400');
 }
 
@@ -53,7 +56,7 @@ const rateLimitMap = new Map();
 function checkRateLimit(req, isWriteOperation = false) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '127.0.0.1';
   const now = Date.now();
-  const windowMs = 60 * 1000; // 1 minute
+  const windowMs = 60 * 1000;
   const maxRequests = isWriteOperation ? 35 : 120;
 
   const record = rateLimitMap.get(ip) || { count: 0, resetAt: now + windowMs };
@@ -65,7 +68,6 @@ function checkRateLimit(req, isWriteOperation = false) {
   }
   rateLimitMap.set(ip, record);
 
-  // Clean stale rate limit memory
   if (rateLimitMap.size > 5000) {
     for (const [key, val] of rateLimitMap.entries()) {
       if (now > val.resetAt) rateLimitMap.delete(key);
@@ -75,17 +77,21 @@ function checkRateLimit(req, isWriteOperation = false) {
   return record.count > maxRequests;
 }
 
-// Secure API Secret Verification (Optional Auth)
-function authenticateRequest(req) {
+// Legacy API secret check (still supported for backward compat)
+function authenticateApiKey(req) {
   const secretKey = process.env.API_SECRET_KEY;
-  if (!secretKey) return true; // If no key set in env, pass through
-
+  if (!secretKey) return true;
   const apiKeyHeader = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '');
   return apiKeyHeader === secretKey;
 }
 
-// Body Size Limiter & JSON Parsing (600KB Cap for compressed receipt images)
-async function parseJsonBody(req, res) {
+// JWT-based authentication middleware — returns user object or null
+function getAuthenticatedUser(req) {
+  return extractUserFromRequest(req);
+}
+
+// Body Size Limiter & JSON Parsing (600KB Cap)
+async function parseJsonBody(req) {
   if (req.body && typeof req.body === 'object') {
     return req.body;
   }
@@ -93,7 +99,7 @@ async function parseJsonBody(req, res) {
   return new Promise((resolve, reject) => {
     let raw = '';
     let bytesRead = 0;
-    const MAX_BYTES = 600 * 1024; // 600 KB max limit
+    const MAX_BYTES = 600 * 1024;
 
     req.on('data', (chunk) => {
       bytesRead += chunk.length;
@@ -107,7 +113,7 @@ async function parseJsonBody(req, res) {
     req.on('end', () => {
       try {
         resolve(raw ? JSON.parse(raw) : {});
-      } catch (err) {
+      } catch (_) {
         reject(new Error('INVALID_JSON'));
       }
     });
@@ -116,13 +122,9 @@ async function parseJsonBody(req, res) {
   });
 }
 
-// Input Sanitization & Anti-XSS Helper
 function sanitizeInput(str, maxLength = 500) {
   if (typeof str !== 'string') return '';
-  return str
-    .trim()
-    .replace(/[<>]/g, '') // Strip potentially dangerous HTML tags
-    .slice(0, maxLength);
+  return str.trim().replace(/[<>]/g, '').slice(0, maxLength);
 }
 
 function isValidDate(dateStr) {
@@ -135,15 +137,16 @@ function isValidId(idStr) {
   return /^[a-zA-Z0-9_-]{1,100}$/.test(idStr.trim());
 }
 
-/**
- * Universal Express / Serverless API Handler
- */
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
+}
+
+// ─── Universal API Handler ────────────────────────────────────────────────────
 export async function handleApiRequest(req, res, next) {
   applyCorsHeaders(req, res);
 
   const method = req.method.toUpperCase();
 
-  // Handle CORS Preflight
   if (method === 'OPTIONS') {
     res.statusCode = 204;
     res.end();
@@ -152,37 +155,14 @@ export async function handleApiRequest(req, res, next) {
 
   const isWrite = method === 'POST' || method === 'PATCH' || method === 'DELETE';
 
-  // 1. Rate Limiting Check
   if (checkRateLimit(req, isWrite)) {
     return sendJson(res, 429, { success: false, error: 'Too many requests. Please slow down.' });
-  }
-
-  // 2. Authentication Check
-  if (!authenticateRequest(req)) {
-    return sendJson(res, 401, { success: false, error: 'Unauthorized: Invalid API Key' });
   }
 
   const url = req.url.split('?')[0];
   const path = url.replace(/^\/api/, '') || '/';
 
-  // 3. Real-Time SSE Stream: /sync/events
-  if (path === '/sync/events' && method === 'GET') {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Content-Type-Options': 'nosniff',
-    });
-    res.write('retry: 3000\n\n');
-    sseClients.add(res);
-
-    req.on('close', () => {
-      sseClients.delete(res);
-    });
-    return;
-  }
-
-  // Ensure DB connection is initialized
+  // Ensure DB is initialized
   try {
     await initDatabase();
   } catch (err) {
@@ -190,10 +170,280 @@ export async function handleApiRequest(req, res, next) {
     return sendJson(res, 500, { success: false, error: 'Database service unavailable' });
   }
 
-  // 4. GET /data
+  // ══════════════════════════════════════════════════════════════════════════
+  // PUBLIC ROUTES (no auth required)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // POST /auth/register
+  if (path === '/auth/register' && method === 'POST') {
+    try {
+      const body = await parseJsonBody(req);
+      const name = sanitizeInput(body.name, 100);
+      const email = sanitizeInput(body.email, 200).toLowerCase();
+      const password = typeof body.password === 'string' ? body.password : '';
+
+      if (!name) return sendJson(res, 400, { success: false, error: 'Name is required' });
+      if (!isValidEmail(email)) return sendJson(res, 400, { success: false, error: 'Valid email is required' });
+      if (!password || password.length < 8) {
+        return sendJson(res, 400, { success: false, error: 'Password must be at least 8 characters' });
+      }
+
+      // Check duplicate email
+      const existing = await db.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
+      if (existing.rows.length > 0) {
+        return sendJson(res, 409, { success: false, error: 'An account with this email already exists' });
+      }
+
+      const now = new Date().toISOString();
+      const userId = `user-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      const passwordHash = await hashPassword(password);
+
+      await db.execute({
+        sql: `INSERT INTO users (id, name, email, password_hash, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [userId, name, email, passwordHash, now, now],
+      });
+
+      // Create default settings for new user
+      const defaultSettings = [
+        { key: 'theme', value: 'light' },
+        { key: 'currency', value: 'INR' },
+        { key: 'notificationsEnabled', value: 'true' },
+      ];
+      await db.batch(
+        defaultSettings.map((s) => ({
+          sql: 'INSERT OR IGNORE INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?)',
+          args: [s.key, s.value, now, userId],
+        })),
+        'write',
+      );
+
+      const token = signToken({ userId, email, name });
+      console.log(`[Auth] User registered: ${email}`);
+
+      return sendJson(res, 201, {
+        success: true,
+        data: {
+          token,
+          user: { id: userId, name, email, createdAt: now },
+        },
+      });
+    } catch (err) {
+      if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
+      if (err.message === 'INVALID_JSON') return sendJson(res, 400, { success: false, error: 'Malformed JSON payload' });
+      console.error('Registration error:', err);
+      return sendJson(res, 500, { success: false, error: 'Registration failed' });
+    }
+  }
+
+  // POST /auth/login
+  if (path === '/auth/login' && method === 'POST') {
+    try {
+      const body = await parseJsonBody(req);
+      const email = sanitizeInput(body.email, 200).toLowerCase();
+      const password = typeof body.password === 'string' ? body.password : '';
+
+      if (!email || !password) {
+        return sendJson(res, 400, { success: false, error: 'Email and password are required' });
+      }
+
+      const userRes = await db.execute({
+        sql: 'SELECT id, name, email, password_hash, created_at FROM users WHERE email = ?',
+        args: [email],
+      });
+      const userRow = userRes.rows[0];
+
+      if (!userRow) {
+        // Constant-time-ish response to avoid user enumeration
+        await hashPassword('dummy-to-avoid-timing-attack');
+        return sendJson(res, 401, { success: false, error: 'Invalid email or password' });
+      }
+
+      const valid = await verifyPassword(password, String(userRow.password_hash));
+      if (!valid) {
+        return sendJson(res, 401, { success: false, error: 'Invalid email or password' });
+      }
+
+      const userId = String(userRow.id);
+      const name = String(userRow.name);
+      const token = signToken({ userId, email, name });
+
+      console.log(`[Auth] User logged in: ${email}`);
+      return sendJson(res, 200, {
+        success: true,
+        data: {
+          token,
+          user: { id: userId, name, email, createdAt: String(userRow.created_at) },
+        },
+      });
+    } catch (err) {
+      if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
+      if (err.message === 'INVALID_JSON') return sendJson(res, 400, { success: false, error: 'Malformed JSON payload' });
+      console.error('Login error:', err);
+      return sendJson(res, 500, { success: false, error: 'Login failed' });
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PROTECTED ROUTES — require valid JWT
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // For all protected routes, verify authentication
+  // Also support legacy API key auth for backward compat during transition
+  const jwtUser = getAuthenticatedUser(req);
+  const hasValidApiKey = authenticateApiKey(req);
+
+  if (!jwtUser && !hasValidApiKey) {
+    return sendJson(res, 401, { success: false, error: 'Unauthorized: Please log in' });
+  }
+
+  // If JWT present, use it (proper multi-user). Otherwise legacy single-user fallback.
+  const userId = jwtUser ? jwtUser.userId : null;
+
+  // If using legacy API key without JWT, reject user-specific routes
+  if (!userId) {
+    return sendJson(res, 401, { success: false, error: 'Unauthorized: Authentication required' });
+  }
+
+  // GET /auth/me
+  if (path === '/auth/me' && method === 'GET') {
+    try {
+      const userRes = await db.execute({
+        sql: 'SELECT id, name, email, created_at, updated_at FROM users WHERE id = ?',
+        args: [userId],
+      });
+      const user = userRes.rows[0];
+      if (!user) return sendJson(res, 404, { success: false, error: 'User not found' });
+
+      return sendJson(res, 200, {
+        success: true,
+        data: {
+          id: String(user.id),
+          name: String(user.name),
+          email: String(user.email),
+          createdAt: String(user.created_at),
+          updatedAt: String(user.updated_at),
+        },
+      });
+    } catch (err) {
+      console.error('GET /auth/me error:', err);
+      return sendJson(res, 500, { success: false, error: 'Failed to fetch user' });
+    }
+  }
+
+  // PATCH /auth/profile
+  if (path === '/auth/profile' && method === 'PATCH') {
+    try {
+      const body = await parseJsonBody(req);
+      const updates = {};
+      const now = new Date().toISOString();
+
+      if (body.name !== undefined) {
+        const name = sanitizeInput(body.name, 100);
+        if (!name) return sendJson(res, 400, { success: false, error: 'Name cannot be empty' });
+        updates.name = name;
+      }
+
+      if (body.email !== undefined) {
+        const email = sanitizeInput(body.email, 200).toLowerCase();
+        if (!isValidEmail(email)) return sendJson(res, 400, { success: false, error: 'Valid email required' });
+        // Check uniqueness against other users
+        const existingRes = await db.execute({
+          sql: 'SELECT id FROM users WHERE email = ? AND id != ?',
+          args: [email, userId],
+        });
+        if (existingRes.rows.length > 0) {
+          return sendJson(res, 409, { success: false, error: 'Email already in use' });
+        }
+        updates.email = email;
+      }
+
+      if (body.currentPassword && body.newPassword) {
+        if (body.newPassword.length < 8) {
+          return sendJson(res, 400, { success: false, error: 'New password must be at least 8 characters' });
+        }
+        const userRes = await db.execute({ sql: 'SELECT password_hash FROM users WHERE id = ?', args: [userId] });
+        const valid = await verifyPassword(body.currentPassword, String(userRes.rows[0]?.password_hash));
+        if (!valid) return sendJson(res, 401, { success: false, error: 'Current password is incorrect' });
+        updates.password_hash = await hashPassword(body.newPassword);
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return sendJson(res, 400, { success: false, error: 'No updates provided' });
+      }
+
+      const setClauses = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
+      const values = [...Object.values(updates), now, userId];
+      await db.execute({
+        sql: `UPDATE users SET ${setClauses}, updated_at = ? WHERE id = ?`,
+        args: values,
+      });
+
+      const updatedRes = await db.execute({
+        sql: 'SELECT id, name, email, created_at, updated_at FROM users WHERE id = ?',
+        args: [userId],
+      });
+      const u = updatedRes.rows[0];
+
+      return sendJson(res, 200, {
+        success: true,
+        data: {
+          id: String(u.id),
+          name: String(u.name),
+          email: String(u.email),
+          createdAt: String(u.created_at),
+          updatedAt: String(u.updated_at),
+        },
+      });
+    } catch (err) {
+      if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
+      if (err.message === 'INVALID_JSON') return sendJson(res, 400, { success: false, error: 'Malformed JSON payload' });
+      console.error('Profile update error:', err);
+      return sendJson(res, 500, { success: false, error: 'Failed to update profile' });
+    }
+  }
+
+  // GET /sync/events — SSE per-user
+  if (path === '/sync/events' && method === 'GET') {
+    // EventSource cannot set custom headers; accept token via URL param as fallback
+    const urlObj = new URLSearchParams(req.url.includes('?') ? req.url.split('?')[1] : '');
+    const urlToken = urlObj.get('_t');
+    let sseUser = jwtUser;
+    if (!sseUser && urlToken) {
+      const { verifyToken } = await import('./auth.js');
+      sseUser = verifyToken(decodeURIComponent(urlToken));
+    }
+    if (!sseUser) {
+      return sendJson(res, 401, { success: false, error: 'Unauthorized' });
+    }
+    const sseUserId = sseUser.userId;
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.write('retry: 3000\n\n');
+
+    if (!sseClients.has(sseUserId)) sseClients.set(sseUserId, new Set());
+    sseClients.get(sseUserId).add(res);
+
+    req.on('close', () => {
+      const clients = sseClients.get(sseUserId);
+      if (clients) {
+        clients.delete(res);
+        if (clients.size === 0) sseClients.delete(sseUserId);
+      }
+    });
+    return;
+  }
+
+
+  // GET /data — user-scoped full data fetch
   if (path === '/data' && method === 'GET') {
     try {
-      const data = await getAllData();
+      const data = await getAllData(userId);
       return sendJson(res, 200, { success: true, data });
     } catch (err) {
       console.error('Error fetching data:', err);
@@ -201,10 +451,114 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 5. POST /meals/toggle
+  // GET /reports/yearly?year=2026
+  if (path === '/reports/yearly' && method === 'GET') {
+    try {
+      const urlParams = new URLSearchParams(req.url.includes('?') ? req.url.split('?')[1] : '');
+      const year = urlParams.get('year');
+
+      if (!year || !/^\d{4}$/.test(year)) {
+        return sendJson(res, 400, { success: false, error: 'Valid year parameter required (e.g. ?year=2026)' });
+      }
+
+      const yearNum = Number(year);
+      if (yearNum < 2000 || yearNum > 2100) {
+        return sendJson(res, 400, { success: false, error: 'Year must be between 2000 and 2100' });
+      }
+
+      // Fetch user info
+      const userRes = await db.execute({
+        sql: 'SELECT id, name, email FROM users WHERE id = ?',
+        args: [userId],
+      });
+      const user = userRes.rows[0];
+      if (!user) return sendJson(res, 404, { success: false, error: 'User not found' });
+
+      const yearlyData = await getYearlyData(userId, year);
+
+      // Build monthly breakdown
+      const months = [
+        'January','February','March','April','May','June',
+        'July','August','September','October','November','December',
+      ];
+
+      const monthlyBreakdown = months.map((monthName, idx) => {
+        const monthKey = `${year}-${String(idx + 1).padStart(2, '0')}`;
+        const monthExpenses = yearlyData.expenses.filter((e) => e.month === monthKey || e.date.startsWith(monthKey));
+        const monthMeals = yearlyData.mealTracker.filter((m) => m.month === monthKey || m.date.startsWith(monthKey));
+        const monthPayments = yearlyData.payments.filter((p) => p.paymentDate.startsWith(monthKey));
+
+        const miscTotal = monthExpenses.reduce((sum, e) => sum + e.totalAmount, 0);
+        const mealTotal = monthPayments.reduce((sum, p) => sum + p.totalAmount, 0);
+        const mealDays = monthMeals.filter((m) => Object.values(m.mealsMarked).some(Boolean)).length;
+        const mealPortions = monthMeals.reduce((sum, m) => sum + Object.values(m.mealsMarked).filter(Boolean).length, 0);
+
+        return {
+          month: monthName,
+          monthKey,
+          expenseCount: monthExpenses.length,
+          miscTotal: Math.round(miscTotal * 100) / 100,
+          mealTotal: Math.round(mealTotal * 100) / 100,
+          total: Math.round((miscTotal + mealTotal) * 100) / 100,
+          mealDays,
+          mealPortions,
+        };
+      });
+
+      const totalExpenses = yearlyData.expenses.reduce((sum, e) => sum + e.totalAmount, 0);
+      const totalMealPayments = yearlyData.payments.reduce((sum, p) => sum + p.totalAmount, 0);
+      const totalOverall = totalExpenses + totalMealPayments;
+      const totalMealDays = yearlyData.mealTracker.filter((m) => Object.values(m.mealsMarked).some(Boolean)).length;
+      const totalMealPortions = yearlyData.mealTracker.reduce((sum, m) => sum + Object.values(m.mealsMarked).filter(Boolean).length, 0);
+
+      // Category breakdown
+      const categoryTotals = {};
+      for (const e of yearlyData.expenses) {
+        categoryTotals[e.category] = (categoryTotals[e.category] || 0) + e.totalAmount;
+      }
+      const categoryBreakdown = Object.entries(categoryTotals)
+        .map(([category, amount]) => ({
+          category,
+          amount: Math.round(amount * 100) / 100,
+          percentage: totalExpenses > 0 ? Math.round((amount / totalExpenses) * 100) : 0,
+        }))
+        .sort((a, b) => b.amount - a.amount);
+
+      const hasData = yearlyData.expenses.length > 0 || yearlyData.mealTracker.length > 0;
+
+      console.log(`[Report] Yearly report generated for user ${userId}, year ${year}, hasData: ${hasData}`);
+
+      return sendJson(res, 200, {
+        success: true,
+        data: {
+          user: { id: String(user.id), name: String(user.name), email: String(user.email) },
+          year: yearNum,
+          generatedAt: new Date().toISOString(),
+          hasData,
+          summary: {
+            totalExpenses: Math.round(totalExpenses * 100) / 100,
+            totalMealPayments: Math.round(totalMealPayments * 100) / 100,
+            totalOverall: Math.round(totalOverall * 100) / 100,
+            totalMealDays,
+            totalMealPortions,
+            expenseCount: yearlyData.expenses.length,
+            paymentCount: yearlyData.payments.length,
+          },
+          monthlyBreakdown,
+          categoryBreakdown,
+          recurringItems: yearlyData.recurringItems,
+        },
+      });
+    } catch (err) {
+      console.error('Yearly report error:', err);
+      return sendJson(res, 500, { success: false, error: 'Failed to generate yearly report' });
+    }
+  }
+
+  // POST /meals/toggle
   if (path === '/meals/toggle' && method === 'POST') {
     try {
-      const body = await parseJsonBody(req, res);
+      const body = await parseJsonBody(req);
       const date = sanitizeInput(body.date, 10);
       const recurringItemId = sanitizeInput(body.recurringItemId, 100);
 
@@ -212,10 +566,19 @@ export async function handleApiRequest(req, res, next) {
         return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) and recurringItemId required' });
       }
 
+      // Verify recurring item belongs to this user
+      const recCheck = await db.execute({
+        sql: 'SELECT id FROM recurring_items WHERE id = ? AND user_id = ?',
+        args: [recurringItemId, userId],
+      });
+      if (recCheck.rows.length === 0) {
+        return sendJson(res, 404, { success: false, error: 'Recurring item not found' });
+      }
+
       const month = date.slice(0, 7);
       const existingRes = await db.execute({
-        sql: 'SELECT * FROM meal_tracker WHERE date = ?',
-        args: [date],
+        sql: 'SELECT * FROM meal_tracker WHERE date = ? AND user_id = ?',
+        args: [date, userId],
       });
       const existing = existingRes.rows[0];
 
@@ -225,34 +588,28 @@ export async function handleApiRequest(req, res, next) {
       if (existing) {
         const currentMarks = existing.meals_marked ? JSON.parse(String(existing.meals_marked)) : {};
         const currentVal = !!currentMarks[recurringItemId];
-        updatedMarks = {
-          ...currentMarks,
-          [recurringItemId]: !currentVal,
-        };
+        updatedMarks = { ...currentMarks, [recurringItemId]: !currentVal };
 
         const hasAnyMarked = Object.values(updatedMarks).some(Boolean);
         if (!hasAnyMarked && !existing.notes) {
-          await db.execute({
-            sql: 'DELETE FROM meal_tracker WHERE date = ?',
-            args: [date],
-          });
+          await db.execute({ sql: 'DELETE FROM meal_tracker WHERE date = ? AND user_id = ?', args: [date, userId] });
         } else {
           await db.execute({
-            sql: 'UPDATE meal_tracker SET meals_marked = ?, updated_at = ? WHERE date = ?',
-            args: [JSON.stringify(updatedMarks), now, date],
+            sql: 'UPDATE meal_tracker SET meals_marked = ?, updated_at = ? WHERE date = ? AND user_id = ?',
+            args: [JSON.stringify(updatedMarks), now, date, userId],
           });
         }
       } else {
         updatedMarks = { [recurringItemId]: true };
         const id = `meal-track-${date}-${Date.now()}`;
         await db.execute({
-          sql: `INSERT INTO meal_tracker (id, date, month, meals_marked, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          args: [id, date, month, JSON.stringify(updatedMarks), '', now, now],
+          sql: `INSERT INTO meal_tracker (id, date, month, meals_marked, notes, created_at, updated_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [id, date, month, JSON.stringify(updatedMarks), '', now, now, userId],
         });
       }
 
-      broadcastEvent('MEAL_TOGGLED', { date, recurringItemId });
+      broadcastEvent(userId, 'MEAL_TOGGLED', { date, recurringItemId });
       return sendJson(res, 200, { success: true, data: { date, mealsMarked: updatedMarks } });
     } catch (err) {
       if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
@@ -262,10 +619,10 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 6. POST /meals/notes
+  // POST /meals/notes
   if (path === '/meals/notes' && method === 'POST') {
     try {
-      const body = await parseJsonBody(req, res);
+      const body = await parseJsonBody(req);
       const date = sanitizeInput(body.date, 10);
       const notes = sanitizeInput(body.notes, 2000);
 
@@ -273,27 +630,27 @@ export async function handleApiRequest(req, res, next) {
 
       const month = date.slice(0, 7);
       const existingRes = await db.execute({
-        sql: 'SELECT * FROM meal_tracker WHERE date = ?',
-        args: [date],
+        sql: 'SELECT * FROM meal_tracker WHERE date = ? AND user_id = ?',
+        args: [date, userId],
       });
       const existing = existingRes.rows[0];
       const now = new Date().toISOString();
 
       if (existing) {
         await db.execute({
-          sql: 'UPDATE meal_tracker SET notes = ?, updated_at = ? WHERE date = ?',
-          args: [notes, now, date],
+          sql: 'UPDATE meal_tracker SET notes = ?, updated_at = ? WHERE date = ? AND user_id = ?',
+          args: [notes, now, date, userId],
         });
       } else if (notes) {
         const id = `meal-track-${date}-${Date.now()}`;
         await db.execute({
-          sql: `INSERT INTO meal_tracker (id, date, month, meals_marked, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          args: [id, date, month, JSON.stringify({}), notes, now, now],
+          sql: `INSERT INTO meal_tracker (id, date, month, meals_marked, notes, created_at, updated_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [id, date, month, JSON.stringify({}), notes, now, now, userId],
         });
       }
 
-      broadcastEvent('NOTES_UPDATED', { date, notes });
+      broadcastEvent(userId, 'NOTES_UPDATED', { date, notes });
       return sendJson(res, 200, { success: true, data: { date, notes } });
     } catch (err) {
       if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
@@ -303,10 +660,10 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 7. POST /expenses
+  // POST /expenses
   if (path === '/expenses' && method === 'POST') {
     try {
-      const body = await parseJsonBody(req, res);
+      const body = await parseJsonBody(req);
       const id = body.id ? sanitizeInput(body.id, 100) : null;
       const date = sanitizeInput(body.date, 10);
       const description = sanitizeInput(body.description, 300);
@@ -317,7 +674,6 @@ export async function handleApiRequest(req, res, next) {
       if (!isValidDate(date) || !description) {
         return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) and description required' });
       }
-
       if (id && !isValidId(id)) {
         return sendJson(res, 400, { success: false, error: 'Invalid expense ID format' });
       }
@@ -327,43 +683,30 @@ export async function handleApiRequest(req, res, next) {
       const qty = Number.isInteger(Number(body.quantity)) ? Math.min(Math.max(1, Number(body.quantity)), 10000) : 1;
       const tot = Number.isFinite(Number(body.totalAmount)) ? Math.min(Math.max(0, Number(body.totalAmount)), 10000000) : uPrice * qty;
       const now = new Date().toISOString();
-
       const expenseId = id || `exp-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
       const existingRes = await db.execute({
-        sql: 'SELECT id FROM expenses WHERE id = ?',
-        args: [expenseId],
+        sql: 'SELECT id FROM expenses WHERE id = ? AND user_id = ?',
+        args: [expenseId, userId],
       });
 
       if (existingRes.rows.length > 0) {
         await db.execute({
-          sql: `UPDATE expenses 
+          sql: `UPDATE expenses
                 SET date = ?, month = ?, description = ?, category = ?, unit_price = ?, quantity = ?, total_amount = ?, notes = ?, attachment = ?, updated_at = ?
-                WHERE id = ?`,
-          args: [date, month, description, category, uPrice, qty, tot, notes, attachment, now, expenseId],
+                WHERE id = ? AND user_id = ?`,
+          args: [date, month, description, category, uPrice, qty, tot, notes, attachment, now, expenseId, userId],
         });
       } else {
         await db.execute({
-          sql: `INSERT INTO expenses (id, date, month, description, category, unit_price, quantity, total_amount, notes, attachment, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [expenseId, date, month, description, category, uPrice, qty, tot, notes, attachment, now, now],
+          sql: `INSERT INTO expenses (id, date, month, description, category, unit_price, quantity, total_amount, notes, attachment, created_at, updated_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [expenseId, date, month, description, category, uPrice, qty, tot, notes, attachment, now, now, userId],
         });
       }
 
-      const savedExpense = {
-        id: expenseId,
-        date,
-        month,
-        description,
-        category,
-        unitPrice: uPrice,
-        quantity: qty,
-        totalAmount: tot,
-        notes,
-        attachment,
-        updatedAt: now,
-      };
-
-      broadcastEvent('EXPENSE_SAVED', savedExpense);
+      const savedExpense = { id: expenseId, date, month, description, category, unitPrice: uPrice, quantity: qty, totalAmount: tot, notes, attachment, updatedAt: now };
+      broadcastEvent(userId, 'EXPENSE_SAVED', savedExpense);
       return sendJson(res, 200, { success: true, data: savedExpense });
     } catch (err) {
       if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
@@ -373,16 +716,20 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 8. DELETE /expenses/:id (Strict Regex Parameter Parsing)
+  // DELETE /expenses/:id
   const deleteExpenseMatch = path.match(/^\/expenses\/([a-zA-Z0-9_-]{1,100})$/);
   if (deleteExpenseMatch && method === 'DELETE') {
     try {
       const id = deleteExpenseMatch[1];
-      await db.execute({
-        sql: 'DELETE FROM expenses WHERE id = ?',
-        args: [id],
+      // Only delete if owned by user
+      const result = await db.execute({
+        sql: 'DELETE FROM expenses WHERE id = ? AND user_id = ?',
+        args: [id, userId],
       });
-      broadcastEvent('EXPENSE_DELETED', { id });
+      if (result.rowsAffected === 0) {
+        return sendJson(res, 404, { success: false, error: 'Expense not found' });
+      }
+      broadcastEvent(userId, 'EXPENSE_DELETED', { id });
       return sendJson(res, 200, { success: true, data: { id } });
     } catch (err) {
       console.error('Error deleting expense:', err);
@@ -390,10 +737,10 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 9. POST /recurring
+  // POST /recurring
   if (path === '/recurring' && method === 'POST') {
     try {
-      const body = await parseJsonBody(req, res);
+      const body = await parseJsonBody(req);
       const id = body.id ? sanitizeInput(body.id, 100) : null;
       const name = sanitizeInput(body.name, 200);
       const frequency = sanitizeInput(body.frequency, 50) || 'daily';
@@ -403,42 +750,44 @@ export async function handleApiRequest(req, res, next) {
       const description = sanitizeInput(body.description, 500);
 
       if (!name) return sendJson(res, 400, { success: false, error: 'Name required' });
-
-      if (id && !isValidId(id)) {
-        return sendJson(res, 400, { success: false, error: 'Invalid recurring item ID format' });
-      }
+      if (id && !isValidId(id)) return sendJson(res, 400, { success: false, error: 'Invalid recurring item ID format' });
 
       const price = Number.isFinite(Number(body.pricePerOccurrence)) ? Math.min(Math.max(0, Number(body.pricePerOccurrence)), 1000000) : 0;
       const now = new Date().toISOString();
       const itemId = id || `rec-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-
       let historyJson = JSON.stringify([{ effectiveFrom: startDate, price }]);
-      if (Array.isArray(body.priceHistory)) {
-        historyJson = JSON.stringify(body.priceHistory);
-      }
-
+      if (Array.isArray(body.priceHistory)) historyJson = JSON.stringify(body.priceHistory);
       const isActiveVal = body.isActive !== false ? 1 : 0;
-      const existingRes = await db.execute({
-        sql: 'SELECT id FROM recurring_items WHERE id = ?',
-        args: [itemId],
-      });
 
-      if (existingRes.rows.length > 0) {
-        await db.execute({
-          sql: `UPDATE recurring_items
-                SET name = ?, price_per_occurrence = ?, frequency = ?, start_date = ?, end_date = ?, is_active = ?, icon = ?, description = ?, price_history = ?, updated_at = ?
-                WHERE id = ?`,
-          args: [name, price, frequency, startDate, endDate, isActiveVal, icon, description, historyJson, now, itemId],
+      // If ID provided, check ownership
+      if (id) {
+        const existingRes = await db.execute({
+          sql: 'SELECT id FROM recurring_items WHERE id = ? AND user_id = ?',
+          args: [itemId, userId],
         });
+        if (existingRes.rows.length > 0) {
+          await db.execute({
+            sql: `UPDATE recurring_items
+                  SET name = ?, price_per_occurrence = ?, frequency = ?, start_date = ?, end_date = ?, is_active = ?, icon = ?, description = ?, price_history = ?, updated_at = ?
+                  WHERE id = ? AND user_id = ?`,
+            args: [name, price, frequency, startDate, endDate, isActiveVal, icon, description, historyJson, now, itemId, userId],
+          });
+        } else {
+          await db.execute({
+            sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [itemId, name, price, frequency, startDate, endDate, isActiveVal, icon, description, historyJson, now, now, userId],
+          });
+        }
       } else {
         await db.execute({
-          sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [itemId, name, price, frequency, startDate, endDate, isActiveVal, icon, description, historyJson, now, now],
+          sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [itemId, name, price, frequency, startDate, endDate, isActiveVal, icon, description, historyJson, now, now, userId],
         });
       }
 
-      broadcastEvent('RECURRING_SAVED', { id: itemId, name });
+      broadcastEvent(userId, 'RECURRING_SAVED', { id: itemId, name });
       return sendJson(res, 200, { success: true, data: { id: itemId } });
     } catch (err) {
       if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
@@ -448,26 +797,25 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 10. PATCH /recurring/:id/toggle (Strict Regex Parsing)
+  // PATCH /recurring/:id/toggle
   const toggleRecurringMatch = path.match(/^\/recurring\/([a-zA-Z0-9_-]{1,100})\/toggle$/);
   if (toggleRecurringMatch && method === 'PATCH') {
     try {
       const id = toggleRecurringMatch[1];
-
       const currentRes = await db.execute({
-        sql: 'SELECT is_active FROM recurring_items WHERE id = ?',
-        args: [id],
+        sql: 'SELECT is_active FROM recurring_items WHERE id = ? AND user_id = ?',
+        args: [id, userId],
       });
       const current = currentRes.rows[0];
       if (!current) return sendJson(res, 404, { success: false, error: 'Item not found' });
 
       const nextState = Number(current.is_active) === 1 ? 0 : 1;
       await db.execute({
-        sql: 'UPDATE recurring_items SET is_active = ?, updated_at = ? WHERE id = ?',
-        args: [nextState, new Date().toISOString(), id],
+        sql: 'UPDATE recurring_items SET is_active = ?, updated_at = ? WHERE id = ? AND user_id = ?',
+        args: [nextState, new Date().toISOString(), id, userId],
       });
 
-      broadcastEvent('RECURRING_TOGGLED', { id, isActive: nextState === 1 });
+      broadcastEvent(userId, 'RECURRING_TOGGLED', { id, isActive: nextState === 1 });
       return sendJson(res, 200, { success: true, data: { id, isActive: nextState === 1 } });
     } catch (err) {
       console.error('Error toggling recurring item:', err);
@@ -475,17 +823,18 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 11. DELETE /recurring/:id (Strict Regex Parsing)
+  // DELETE /recurring/:id
   const deleteRecurringMatch = path.match(/^\/recurring\/([a-zA-Z0-9_-]{1,100})$/);
   if (deleteRecurringMatch && method === 'DELETE') {
     try {
       const id = deleteRecurringMatch[1];
-
-      await db.execute({
-        sql: 'DELETE FROM recurring_items WHERE id = ?',
-        args: [id],
+      const result = await db.execute({
+        sql: 'DELETE FROM recurring_items WHERE id = ? AND user_id = ?',
+        args: [id, userId],
       });
-      broadcastEvent('RECURRING_DELETED', { id });
+      if (result.rowsAffected === 0) return sendJson(res, 404, { success: false, error: 'Item not found' });
+
+      broadcastEvent(userId, 'RECURRING_DELETED', { id });
       return sendJson(res, 200, { success: true, data: { id } });
     } catch (err) {
       console.error('Error deleting recurring item:', err);
@@ -493,10 +842,10 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 12. POST /budgets
+  // POST /budgets
   if (path === '/budgets' && method === 'POST') {
     try {
-      const body = await parseJsonBody(req, res);
+      const body = await parseJsonBody(req);
       const id = body.id ? sanitizeInput(body.id, 100) : null;
       const month = sanitizeInput(body.month, 7);
       const category = sanitizeInput(body.category, 50) || 'overall';
@@ -507,17 +856,17 @@ export async function handleApiRequest(req, res, next) {
       }
 
       const now = new Date().toISOString();
-      const budgetId = id || `bgt-${month}-${category}`;
+      const budgetId = id || `bgt-${month}-${category}-${userId.slice(-6)}`;
 
       await db.execute({
-        sql: `INSERT INTO budgets (id, month, category, amount, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?)
+        sql: `INSERT INTO budgets (id, month, category, amount, created_at, updated_at, user_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(month, category) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at`,
-        args: [budgetId, month, category, amount, now, now],
+        args: [budgetId, month, category, amount, now, now, userId],
       });
 
       const savedBudget = { id: budgetId, month, category, amount, updatedAt: now };
-      broadcastEvent('BUDGET_SAVED', savedBudget);
+      broadcastEvent(userId, 'BUDGET_SAVED', savedBudget);
       return sendJson(res, 200, { success: true, data: savedBudget });
     } catch (err) {
       if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
@@ -527,16 +876,18 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 13. DELETE /budgets/:id
+  // DELETE /budgets/:id
   const deleteBudgetMatch = path.match(/^\/budgets\/([a-zA-Z0-9_-]{1,100})$/);
   if (deleteBudgetMatch && method === 'DELETE') {
     try {
       const id = deleteBudgetMatch[1];
-      await db.execute({
-        sql: 'DELETE FROM budgets WHERE id = ?',
-        args: [id],
+      const result = await db.execute({
+        sql: 'DELETE FROM budgets WHERE id = ? AND user_id = ?',
+        args: [id, userId],
       });
-      broadcastEvent('BUDGET_DELETED', { id });
+      if (result.rowsAffected === 0) return sendJson(res, 404, { success: false, error: 'Budget not found' });
+
+      broadcastEvent(userId, 'BUDGET_DELETED', { id });
       return sendJson(res, 200, { success: true, data: { id } });
     } catch (err) {
       console.error('Error deleting budget:', err);
@@ -544,10 +895,10 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 14. POST /settings
+  // POST /settings
   if (path === '/settings' && method === 'POST') {
     try {
-      const settingsObj = await parseJsonBody(req, res);
+      const settingsObj = await parseJsonBody(req);
       if (typeof settingsObj !== 'object' || Array.isArray(settingsObj)) {
         return sendJson(res, 400, { success: false, error: 'Settings must be an object' });
       }
@@ -560,9 +911,9 @@ export async function handleApiRequest(req, res, next) {
         const sanitizedVal = sanitizeInput(String(v), 500);
         if (sanitizedKey) {
           statements.push({
-            sql: `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-                  ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-            args: [sanitizedKey, sanitizedVal, now],
+            sql: `INSERT INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?)
+                  ON CONFLICT(key, user_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+            args: [sanitizedKey, sanitizedVal, now, userId],
           });
         }
       }
@@ -571,7 +922,7 @@ export async function handleApiRequest(req, res, next) {
         await db.batch(statements, 'write');
       }
 
-      broadcastEvent('SETTINGS_UPDATED', settingsObj);
+      broadcastEvent(userId, 'SETTINGS_UPDATED', settingsObj);
       return sendJson(res, 200, { success: true, data: settingsObj });
     } catch (err) {
       if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
@@ -581,10 +932,10 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 15. POST /clear (Data Reset protection with Admin Secret support)
+  // POST /clear
   if (path === '/clear' && method === 'POST') {
     try {
-      const body = await parseJsonBody(req, res);
+      const body = await parseJsonBody(req);
       const adminSecret = process.env.ADMIN_SECRET;
 
       if (adminSecret && req.headers['x-admin-secret'] !== adminSecret) {
@@ -595,15 +946,16 @@ export async function handleApiRequest(req, res, next) {
         return sendJson(res, 400, { success: false, error: 'Data clear confirmation required' });
       }
 
+      // Only clear the authenticated user's data
       await db.batch([
-        { sql: 'DELETE FROM meal_tracker', args: [] },
-        { sql: 'DELETE FROM expenses', args: [] },
-        { sql: 'DELETE FROM recurring_items', args: [] },
-        { sql: 'DELETE FROM budgets', args: [] },
-        { sql: 'DELETE FROM payments', args: [] },
+        { sql: 'DELETE FROM meal_tracker WHERE user_id = ?', args: [userId] },
+        { sql: 'DELETE FROM expenses WHERE user_id = ?', args: [userId] },
+        { sql: 'DELETE FROM recurring_items WHERE user_id = ?', args: [userId] },
+        { sql: 'DELETE FROM budgets WHERE user_id = ?', args: [userId] },
+        { sql: 'DELETE FROM payments WHERE user_id = ?', args: [userId] },
       ], 'write');
 
-      broadcastEvent('DATA_CLEARED', {});
+      broadcastEvent(userId, 'DATA_CLEARED', {});
       return sendJson(res, 200, { success: true });
     } catch (err) {
       console.error('Error clearing data:', err);
@@ -611,10 +963,10 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 16. POST /payments/mark-paid
+  // POST /payments/mark-paid
   if (path === '/payments/mark-paid' && method === 'POST') {
     try {
-      const body = await parseJsonBody(req, res);
+      const body = await parseJsonBody(req);
       const recurringItemId = sanitizeInput(body.recurringItemId, 100);
       const paidTillDate = sanitizeInput(body.paidTillDate, 10);
       const notes = sanitizeInput(body.notes, 1000);
@@ -623,38 +975,29 @@ export async function handleApiRequest(req, res, next) {
         return sendJson(res, 400, { success: false, error: 'Valid recurringItemId and paidTillDate (YYYY-MM-DD) required' });
       }
 
+      // Verify item ownership
       const recRes = await db.execute({
-        sql: 'SELECT * FROM recurring_items WHERE id = ?',
-        args: [recurringItemId],
+        sql: 'SELECT * FROM recurring_items WHERE id = ? AND user_id = ?',
+        args: [recurringItemId, userId],
       });
       const itemRow = recRes.rows[0];
-      if (!itemRow) {
-        return sendJson(res, 404, { success: false, error: 'Recurring item not found' });
-      }
+      if (!itemRow) return sendJson(res, 404, { success: false, error: 'Recurring item not found' });
 
       const mealRes = await db.execute({
-        sql: 'SELECT * FROM meal_tracker ORDER BY date ASC',
-        args: [],
+        sql: 'SELECT * FROM meal_tracker WHERE user_id = ? ORDER BY date ASC',
+        args: [userId],
       });
 
       const eligibleEntries = [];
       for (const row of mealRes.rows) {
         const date = String(row.date);
         if (date > paidTillDate) continue;
-
         const mealsMarked = row.meals_marked ? JSON.parse(String(row.meals_marked)) : {};
         const mealsPaid = row.meals_paid ? JSON.parse(String(row.meals_paid)) : {};
-
         const isMarked = !!mealsMarked[recurringItemId];
         const isPaid = !!(mealsPaid[recurringItemId]?.paid || mealsPaid[recurringItemId] === true);
-
         if (isMarked && !isPaid) {
-          eligibleEntries.push({
-            id: String(row.id),
-            date,
-            mealsMarked,
-            mealsPaid,
-          });
+          eligibleEntries.push({ id: String(row.id), date, mealsMarked, mealsPaid });
         }
       }
 
@@ -668,7 +1011,6 @@ export async function handleApiRequest(req, res, next) {
       const todayDateStr = now.slice(0, 10);
       const paymentId = `pay-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
-      // Calculate historical total price
       const priceHistory = itemRow.price_history ? JSON.parse(String(itemRow.price_history)) : [];
       let totalAmount = 0;
       for (const entry of eligibleEntries) {
@@ -676,47 +1018,30 @@ export async function handleApiRequest(req, res, next) {
         if (Array.isArray(priceHistory) && priceHistory.length > 0) {
           const sorted = [...priceHistory].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
           const applicable = sorted.find((p) => p.effectiveFrom <= entry.date);
-          if (applicable && typeof applicable.price === 'number') {
-            price = applicable.price;
-          }
+          if (applicable && typeof applicable.price === 'number') price = applicable.price;
         }
         totalAmount += price;
       }
 
       const statements = [];
       for (const entry of eligibleEntries) {
-        const updatedMealsPaid = {
-          ...entry.mealsPaid,
-          [recurringItemId]: { paid: true, paymentId, paidAt: now },
-        };
+        const updatedMealsPaid = { ...entry.mealsPaid, [recurringItemId]: { paid: true, paymentId, paidAt: now } };
         statements.push({
-          sql: 'UPDATE meal_tracker SET meals_paid = ?, updated_at = ? WHERE id = ?',
-          args: [JSON.stringify(updatedMealsPaid), now, entry.id],
+          sql: 'UPDATE meal_tracker SET meals_paid = ?, updated_at = ? WHERE id = ? AND user_id = ?',
+          args: [JSON.stringify(updatedMealsPaid), now, entry.id, userId],
         });
       }
 
       statements.push({
-        sql: `INSERT INTO payments (id, recurring_item_id, start_date, paid_till_date, meal_count, total_amount, payment_date, notes, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [paymentId, recurringItemId, unpaidStartDate, paidTillDate, mealCount, totalAmount, todayDateStr, notes, now, now],
+        sql: `INSERT INTO payments (id, recurring_item_id, start_date, paid_till_date, meal_count, total_amount, payment_date, notes, created_at, updated_at, user_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [paymentId, recurringItemId, unpaidStartDate, paidTillDate, mealCount, totalAmount, todayDateStr, notes, now, now, userId],
       });
 
       await db.batch(statements, 'write');
 
-      const newPayment = {
-        id: paymentId,
-        recurringItemId,
-        startDate: unpaidStartDate,
-        paidTillDate,
-        mealCount,
-        totalAmount,
-        paymentDate: todayDateStr,
-        notes,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      broadcastEvent('MEAL_PAID', newPayment);
+      const newPayment = { id: paymentId, recurringItemId, startDate: unpaidStartDate, paidTillDate, mealCount, totalAmount, paymentDate: todayDateStr, notes, createdAt: now, updatedAt: now };
+      broadcastEvent(userId, 'MEAL_PAID', newPayment);
       return sendJson(res, 200, { success: true, data: newPayment });
     } catch (err) {
       if (err.message === 'PAYLOAD_TOO_LARGE') return sendJson(res, 413, { success: false, error: 'Payload too large' });
@@ -726,27 +1051,25 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 17. DELETE /payments/:id
+  // DELETE /payments/:id
   const deletePaymentMatch = path.match(/^\/payments\/([a-zA-Z0-9_-]{1,100})$/);
   if (deletePaymentMatch && method === 'DELETE') {
     try {
       const paymentId = deletePaymentMatch[1];
       const payRes = await db.execute({
-        sql: 'SELECT * FROM payments WHERE id = ?',
-        args: [paymentId],
+        sql: 'SELECT * FROM payments WHERE id = ? AND user_id = ?',
+        args: [paymentId, userId],
       });
       const paymentRow = payRes.rows[0];
-      if (!paymentRow) {
-        return sendJson(res, 404, { success: false, error: 'Payment record not found' });
-      }
+      if (!paymentRow) return sendJson(res, 404, { success: false, error: 'Payment record not found' });
 
       const recId = String(paymentRow.recurring_item_id);
       const startDate = String(paymentRow.start_date);
       const paidTillDate = String(paymentRow.paid_till_date);
 
       const mealRes = await db.execute({
-        sql: 'SELECT * FROM meal_tracker WHERE date >= ? AND date <= ?',
-        args: [startDate, paidTillDate],
+        sql: 'SELECT * FROM meal_tracker WHERE date >= ? AND date <= ? AND user_id = ?',
+        args: [startDate, paidTillDate, userId],
       });
 
       const now = new Date().toISOString();
@@ -757,20 +1080,17 @@ export async function handleApiRequest(req, res, next) {
         if (recId in mealsPaid) {
           delete mealsPaid[recId];
           statements.push({
-            sql: 'UPDATE meal_tracker SET meals_paid = ?, updated_at = ? WHERE id = ?',
-            args: [JSON.stringify(mealsPaid), now, String(row.id)],
+            sql: 'UPDATE meal_tracker SET meals_paid = ?, updated_at = ? WHERE id = ? AND user_id = ?',
+            args: [JSON.stringify(mealsPaid), now, String(row.id), userId],
           });
         }
       }
 
-      statements.push({
-        sql: 'DELETE FROM payments WHERE id = ?',
-        args: [paymentId],
-      });
+      statements.push({ sql: 'DELETE FROM payments WHERE id = ? AND user_id = ?', args: [paymentId, userId] });
 
       await db.batch(statements, 'write');
 
-      broadcastEvent('PAYMENT_DELETED', { id: paymentId });
+      broadcastEvent(userId, 'PAYMENT_DELETED', { id: paymentId });
       return sendJson(res, 200, { success: true, data: { id: paymentId } });
     } catch (err) {
       console.error('Error deleting payment:', err);
@@ -778,11 +1098,11 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // 18. POST /maintenance (Monthly & Security Maintenance Routine)
+  // POST /maintenance
   if (path === '/maintenance' && method === 'POST') {
     try {
       const results = await runDatabaseMaintenance();
-      broadcastEvent('MAINTENANCE_COMPLETED', results);
+      broadcastEvent(userId, 'MAINTENANCE_COMPLETED', results);
       return sendJson(res, 200, { success: true, data: results });
     } catch (err) {
       console.error('Maintenance error:', err);
@@ -790,7 +1110,6 @@ export async function handleApiRequest(req, res, next) {
     }
   }
 
-  // Fallthrough 404
   if (next) {
     next();
   } else {

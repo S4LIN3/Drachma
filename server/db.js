@@ -16,11 +16,15 @@ export const db = createClient({
 
 let isInitialized = false;
 
+// ─── Default user ID for pre-existing (migrated) data ───────────────────────
+export const DEFAULT_USER_ID = 'user-default-migrated';
+
 // Initialize Database Schema asynchronously
 export async function initDatabase() {
   if (isInitialized) return;
 
   try {
+    // ── 1. Core tables (existing schema, unchanged) ──────────────────────────
     await db.batch([
       {
         sql: `CREATE TABLE IF NOT EXISTS recurring_items (
@@ -82,9 +86,11 @@ export async function initDatabase() {
       },
       {
         sql: `CREATE TABLE IF NOT EXISTS settings (
-          key TEXT PRIMARY KEY,
+          key TEXT NOT NULL,
           value TEXT NOT NULL,
-          updated_at TEXT
+          updated_at TEXT,
+          user_id TEXT,
+          UNIQUE(key, user_id)
         );`,
         args: [],
       },
@@ -105,21 +111,120 @@ export async function initDatabase() {
       },
     ], 'write');
 
-    // Safe migration: Add attachment column if expenses table existed previously without it
-    try {
-      await db.execute('ALTER TABLE expenses ADD COLUMN attachment TEXT DEFAULT ""');
-    } catch (e) {
-      // Column already exists or table freshly created
+    // ── 2. NEW: Users table ──────────────────────────────────────────────────
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    // ── 3. Safe column additions for previously created tables ───────────────
+    const safeAlters = [
+      'ALTER TABLE expenses ADD COLUMN attachment TEXT DEFAULT ""',
+      'ALTER TABLE meal_tracker ADD COLUMN meals_paid TEXT DEFAULT "{}"',
+      // user_id columns for data ownership
+      `ALTER TABLE recurring_items ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
+      `ALTER TABLE meal_tracker ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
+      `ALTER TABLE expenses ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
+      `ALTER TABLE budgets ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
+      `ALTER TABLE payments ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
+      // User-specific settings: change key uniqueness to (user_id, key)
+      `ALTER TABLE settings ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
+    ];
+
+    for (const sql of safeAlters) {
+      try {
+        await db.execute(sql);
+      } catch (_) {
+        // Column already exists — ignore
+      }
     }
 
-    // Safe migration: Add meals_paid column if meal_tracker table existed previously without it
+    // ── 4. Safe migration for settings table: ensure (key, user_id) composite unique ──
+    // The old settings table had `key TEXT PRIMARY KEY`. We need to handle migration.
     try {
-      await db.execute('ALTER TABLE meal_tracker ADD COLUMN meals_paid TEXT DEFAULT "{}"');
+      // Check if settings has user_id column already
+      const tableInfo = await db.execute("PRAGMA table_info(settings)");
+      const hasUserId = tableInfo.rows.some((r) => String(r.name) === 'user_id');
+      
+      if (!hasUserId) {
+        // Old schema: key TEXT PRIMARY KEY. Migrate data to new structure.
+        // 1. Rename old table
+        await db.execute('ALTER TABLE settings RENAME TO settings_old');
+        // 2. Create new table with composite unique
+        await db.execute(`
+          CREATE TABLE settings (
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            updated_at TEXT,
+            user_id TEXT,
+            UNIQUE(key, user_id)
+          )
+        `);
+        // 3. Copy old data with default user
+        await db.execute(`
+          INSERT OR IGNORE INTO settings (key, value, updated_at, user_id)
+          SELECT key, value, updated_at, '${DEFAULT_USER_ID}' FROM settings_old
+        `);
+        // 4. Drop old table
+        await db.execute('DROP TABLE settings_old');
+        console.log('[DB] Migrated settings table to (key, user_id) composite unique');
+      }
     } catch (e) {
-      // Column already exists or table freshly created
+      // Migration failed gracefully — table may already be in new format
+      console.warn('[DB] Settings migration warning:', e.message);
     }
 
-    // Performance Indexes for Fast Monthly Queries & Scalability
+    // ── 5. Safe migration for meal_tracker: date UNIQUE → (date, user_id) UNIQUE ──
+    try {
+      const mtInfo = await db.execute('PRAGMA index_list(meal_tracker)');
+      let hasDateAloneUnique = false;
+      for (const idx of mtInfo.rows) {
+        if (String(idx.unique) === '1') {
+          try {
+            const idxInfo = await db.execute(`PRAGMA index_info(${String(idx.name)})`);
+            const cols = idxInfo.rows.map((r) => String(r.name));
+            if (cols.length === 1 && cols[0] === 'date') {
+              hasDateAloneUnique = true;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+
+      if (hasDateAloneUnique) {
+        await db.execute('ALTER TABLE meal_tracker RENAME TO meal_tracker_old');
+        await db.execute(`
+          CREATE TABLE meal_tracker (
+            id TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
+            month TEXT NOT NULL,
+            meals_marked TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            meals_paid TEXT DEFAULT '{}',
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT,
+            UNIQUE(date, user_id)
+          )
+        `);
+        await db.execute(`
+          INSERT OR IGNORE INTO meal_tracker (id, date, month, meals_marked, notes, meals_paid, created_at, updated_at, user_id)
+          SELECT id, date, month, meals_marked, notes, COALESCE(meals_paid, '{}'), created_at, updated_at, '${DEFAULT_USER_ID}'
+          FROM meal_tracker_old
+        `);
+        await db.execute('DROP TABLE meal_tracker_old');
+        console.log('[DB] Migrated meal_tracker to (date, user_id) composite unique');
+      }
+    } catch (e) {
+      console.warn('[DB] meal_tracker migration warning:', e.message);
+    }
+
     try {
       await db.batch([
         { sql: 'CREATE INDEX IF NOT EXISTS idx_meal_tracker_date ON meal_tracker(date);', args: [] },
@@ -129,12 +234,60 @@ export async function initDatabase() {
         { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_recurring ON payments(recurring_item_id);', args: [] },
         { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date);', args: [] },
         { sql: 'CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);', args: [] },
+        // User ownership indexes
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(user_id);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_meal_tracker_user ON meal_tracker(user_id);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_recurring_user ON recurring_items(user_id);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_budgets_user ON budgets(user_id);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);', args: [] },
+        { sql: 'CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id);', args: [] },
+        { sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);', args: [] },
       ], 'write');
-    } catch (e) {
-      // Index creation failed gracefully
+    } catch (_) {
+      // Index creation failures are non-fatal
     }
 
-    // Default recurring templates if empty
+    // ── 5. Migrate existing data: ensure a default user exists ───────────────
+    const defaultUserRes = await db.execute({
+      sql: 'SELECT id FROM users WHERE id = ? OR email = ?',
+      args: [DEFAULT_USER_ID, 'admin@drachma.local'],
+    });
+
+    if (defaultUserRes.rows.length === 0) {
+      // Import here to avoid circular deps — only needed once
+      const { hashPassword } = await import('./auth.js');
+      const now = new Date().toISOString();
+      const defaultPasswordHash = await hashPassword('ChangeMe2026!');
+
+      try {
+        await db.execute({
+          sql: `INSERT OR IGNORE INTO users (id, name, email, password_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)`,
+          args: [DEFAULT_USER_ID, 'Default User', 'admin@drachma.local', defaultPasswordHash, now, now],
+        });
+        console.log(`[DB] Default migration user created: admin@drachma.local / ChangeMe2026!`);
+      } catch (err) {
+        console.warn(`[DB] Default user insert handled:`, err.message);
+      }
+    }
+
+    // ── 6. Migrate existing records that have null / empty user_id ───────────
+    const tables = [
+      'recurring_items', 'meal_tracker', 'expenses', 'budgets', 'payments', 'settings',
+    ];
+    for (const table of tables) {
+      try {
+        await db.execute({
+          sql: `UPDATE ${table} SET user_id = ? WHERE user_id IS NULL OR user_id = ''`,
+          args: [DEFAULT_USER_ID],
+        });
+      } catch (_) {
+        // Table may not have user_id yet if added in this run — ignore
+      }
+    }
+
+    // ── 7. Default recurring items if table is empty ─────────────────────────
     const countRes = await db.execute('SELECT COUNT(*) as count FROM recurring_items');
     const count = Number(countRes.rows[0]?.count || 0);
 
@@ -186,27 +339,19 @@ export async function initDatabase() {
       ];
 
       const statements = defaultTemplates.map((item) => ({
-        sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
-          item.id,
-          item.name,
-          item.price_per_occurrence,
-          item.frequency,
-          item.start_date,
-          item.end_date,
-          item.is_active,
-          item.icon,
-          item.description,
-          item.price_history,
-          item.created_at,
-          item.updated_at,
+          item.id, item.name, item.price_per_occurrence, item.frequency,
+          item.start_date, item.end_date, item.is_active, item.icon,
+          item.description, item.price_history, item.created_at, item.updated_at,
+          DEFAULT_USER_ID,
         ],
       }));
       await db.batch(statements, 'write');
     }
 
-    // Default settings if empty
+    // ── 8. Default settings if empty ─────────────────────────────────────────
     const settingsCountRes = await db.execute('SELECT COUNT(*) as count FROM settings');
     const settingsCount = Number(settingsCountRes.rows[0]?.count || 0);
 
@@ -218,30 +363,34 @@ export async function initDatabase() {
         { key: 'notificationsEnabled', value: 'true' },
       ];
       const settingsStatements = defaultSettings.map((s) => ({
-        sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)',
-        args: [s.key, s.value, now],
+        sql: 'INSERT OR IGNORE INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?)',
+        args: [s.key, s.value, now, DEFAULT_USER_ID],
       }));
       await db.batch(settingsStatements, 'write');
     }
 
     isInitialized = true;
+    console.log('[DB] Database initialized successfully');
   } catch (err) {
     console.error('Failed to initialize database:', err);
     throw err;
   }
 }
 
-// Helper Queries for Full Data Synchronization
-export async function getAllData() {
+// ─── User-scoped data fetch ──────────────────────────────────────────────────
+
+export async function getAllData(userId) {
   await initDatabase();
 
+  if (!userId) throw new Error('userId required for getAllData');
+
   const [recRes, mealRes, expRes, budgetRes, setRes, payRes] = await Promise.all([
-    db.execute('SELECT * FROM recurring_items'),
-    db.execute('SELECT * FROM meal_tracker ORDER BY date ASC'),
-    db.execute('SELECT * FROM expenses ORDER BY date DESC'),
-    db.execute('SELECT * FROM budgets'),
-    db.execute('SELECT * FROM settings'),
-    db.execute('SELECT * FROM payments ORDER BY payment_date DESC, created_at DESC'),
+    db.execute({ sql: 'SELECT * FROM recurring_items WHERE user_id = ?', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM meal_tracker WHERE user_id = ? ORDER BY date ASC', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM budgets WHERE user_id = ?', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM settings WHERE user_id = ?', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM payments WHERE user_id = ? ORDER BY payment_date DESC, created_at DESC', args: [userId] }),
   ]);
 
   const recurringItems = recRes.rows.map((r) => ({
@@ -317,11 +466,99 @@ export async function getAllData() {
 }
 
 /**
+ * Fetch yearly data for a specific user and year for report generation.
+ * Returns expenses, meal_tracker records, payments, and recurring_items
+ * filtered to the given calendar year.
+ */
+export async function getYearlyData(userId, year) {
+  await initDatabase();
+
+  if (!userId) throw new Error('userId required');
+  if (!year || !/^\d{4}$/.test(String(year))) throw new Error('Valid 4-digit year required');
+
+  const startDate = `${year}-01-01`;
+  const endDate = `${year}-12-31`;
+  // Half-open range: date >= startDate AND date < startOfNextYear
+  const startOfNextYear = `${Number(year) + 1}-01-01`;
+
+  const [expRes, mealRes, payRes, recRes] = await Promise.all([
+    db.execute({
+      sql: `SELECT * FROM expenses
+            WHERE user_id = ?
+              AND date >= ?
+              AND date < ?
+            ORDER BY date ASC`,
+      args: [userId, startDate, startOfNextYear],
+    }),
+    db.execute({
+      sql: `SELECT * FROM meal_tracker
+            WHERE user_id = ?
+              AND date >= ?
+              AND date < ?
+            ORDER BY date ASC`,
+      args: [userId, startDate, startOfNextYear],
+    }),
+    db.execute({
+      sql: `SELECT * FROM payments
+            WHERE user_id = ?
+              AND payment_date >= ?
+              AND payment_date < ?
+            ORDER BY payment_date ASC`,
+      args: [userId, startDate, startOfNextYear],
+    }),
+    db.execute({
+      sql: 'SELECT * FROM recurring_items WHERE user_id = ?',
+      args: [userId],
+    }),
+  ]);
+
+  const expenses = expRes.rows.map((e) => ({
+    id: String(e.id),
+    date: String(e.date),
+    month: String(e.month),
+    description: String(e.description),
+    category: String(e.category),
+    unitPrice: Number(e.unit_price),
+    quantity: Number(e.quantity),
+    totalAmount: Number(e.total_amount),
+    notes: e.notes ? String(e.notes) : '',
+    createdAt: e.created_at ? String(e.created_at) : null,
+  }));
+
+  const mealTracker = mealRes.rows.map((m) => ({
+    id: String(m.id),
+    date: String(m.date),
+    month: String(m.month),
+    mealsMarked: m.meals_marked ? JSON.parse(String(m.meals_marked)) : {},
+    mealsPaid: m.meals_paid ? JSON.parse(String(m.meals_paid)) : {},
+    notes: m.notes ? String(m.notes) : '',
+  }));
+
+  const payments = payRes.rows.map((p) => ({
+    id: String(p.id),
+    recurringItemId: String(p.recurring_item_id),
+    startDate: String(p.start_date),
+    paidTillDate: String(p.paid_till_date),
+    mealCount: Number(p.meal_count),
+    totalAmount: Number(p.total_amount),
+    paymentDate: String(p.payment_date),
+    notes: p.notes ? String(p.notes) : '',
+  }));
+
+  const recurringItems = recRes.rows.map((r) => ({
+    id: String(r.id),
+    name: String(r.name),
+    pricePerOccurrence: Number(r.price_per_occurrence),
+    frequency: String(r.frequency || 'daily'),
+    icon: String(r.icon || '🍽️'),
+    priceHistory: r.price_history ? JSON.parse(String(r.price_history)) : [],
+  }));
+
+  return { expenses, mealTracker, payments, recurringItems, year: Number(year) };
+}
+
+/**
  * Monthly / Periodic Database Maintenance Routine
- * 1. Checks integrity of the database
- * 2. Runs PRAGMA optimize for query optimization
- * 3. Cleans up empty / orphan meal tracker rows
- * 4. Checks status of tables and records
  */
 export async function runDatabaseMaintenance() {
   await initDatabase();
@@ -334,23 +571,15 @@ export async function runDatabaseMaintenance() {
   };
 
   try {
-    // 1. Run Integrity Check
     const integrityRes = await db.execute('PRAGMA integrity_check');
     const integrityRow = integrityRes.rows[0];
     results.integrityCheck = integrityRow ? Object.values(integrityRow)[0] : 'ok';
 
-    // 2. Query stats & optimizer
     try {
       await db.execute('PRAGMA optimize');
-    } catch (e) {
-      // Ignored for environments where pragma optimize is not supported
-    }
+    } catch (_) {}
 
-    // 3. Clean up empty meal tracker rows (no meals marked and no notes)
-    const emptyRowsRes = await db.execute(`
-      SELECT id, meals_marked, notes FROM meal_tracker
-    `);
-    
+    const emptyRowsRes = await db.execute('SELECT id, meals_marked, notes FROM meal_tracker');
     const orphanIds = [];
     for (const row of emptyRowsRes.rows) {
       const marks = row.meals_marked ? JSON.parse(String(row.meals_marked)) : {};
@@ -368,16 +597,17 @@ export async function runDatabaseMaintenance() {
       results.cleanedRecords = orphanIds.length;
     }
 
-    // 4. Record counts
-    const [recC, mealC, expC, bgtC, payC] = await Promise.all([
+    const [recC, mealC, expC, bgtC, payC, usrC] = await Promise.all([
       db.execute('SELECT COUNT(*) as c FROM recurring_items'),
       db.execute('SELECT COUNT(*) as c FROM meal_tracker'),
       db.execute('SELECT COUNT(*) as c FROM expenses'),
       db.execute('SELECT COUNT(*) as c FROM budgets'),
       db.execute('SELECT COUNT(*) as c FROM payments'),
+      db.execute('SELECT COUNT(*) as c FROM users'),
     ]);
 
     results.recordsCount = {
+      users: Number(usrC.rows[0]?.c || 0),
       recurringItems: Number(recC.rows[0]?.c || 0),
       mealTrackerDays: Number(mealC.rows[0]?.c || 0),
       expenses: Number(expC.rows[0]?.c || 0),
