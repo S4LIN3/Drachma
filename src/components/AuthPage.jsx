@@ -124,15 +124,17 @@ export function AuthPage({ onSuccess }) {
             {/* Name (register only) */}
             {mode === 'register' && (
               <div>
-                <label className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label htmlFor="auth-name" className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
                   Full Name
                 </label>
                 <input
+                  id="auth-name"
                   type="text"
                   autoComplete="name"
                   value={form.name}
                   onChange={update('name')}
                   placeholder="Your name"
+                  aria-invalid={!!errors.name}
                   className={`w-full px-3 py-2 text-sm rounded-lg border ${
                     errors.name ? 'border-red-400 dark:border-red-600' : 'border-neutral-300 dark:border-neutral-700'
                   } bg-white dark:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400`}
@@ -143,15 +145,17 @@ export function AuthPage({ onSuccess }) {
 
             {/* Email */}
             <div>
-              <label className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label htmlFor="auth-email" className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
                 Email
               </label>
               <input
+                id="auth-email"
                 type="email"
                 autoComplete="email"
                 value={form.email}
                 onChange={update('email')}
                 placeholder="you@example.com"
+                aria-invalid={!!errors.email}
                 className={`w-full px-3 py-2 text-sm rounded-lg border ${
                   errors.email ? 'border-red-400 dark:border-red-600' : 'border-neutral-300 dark:border-neutral-700'
                 } bg-white dark:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400`}
@@ -161,16 +165,18 @@ export function AuthPage({ onSuccess }) {
 
             {/* Password */}
             <div>
-              <label className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+              <label htmlFor="auth-password" className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
                 Password
               </label>
               <div className="relative">
                 <input
+                  id="auth-password"
                   type={showPassword ? 'text' : 'password'}
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                   value={form.password}
                   onChange={update('password')}
                   placeholder={mode === 'register' ? 'At least 8 characters' : '••••••••'}
+                  aria-invalid={!!errors.password}
                   className={`w-full px-3 py-2 pr-9 text-sm rounded-lg border ${
                     errors.password ? 'border-red-400 dark:border-red-600' : 'border-neutral-300 dark:border-neutral-700'
                   } bg-white dark:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400`}
@@ -179,6 +185,7 @@ export function AuthPage({ onSuccess }) {
                   type="button"
                   onClick={() => setShowPassword((v) => !v)}
                   className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
                   tabIndex={-1}
                 >
                   {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -190,15 +197,17 @@ export function AuthPage({ onSuccess }) {
             {/* Confirm password (register) */}
             {mode === 'register' && (
               <div>
-                <label className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                <label htmlFor="auth-confirm-password" className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
                   Confirm Password
                 </label>
                 <input
+                  id="auth-confirm-password"
                   type="password"
                   autoComplete="new-password"
                   value={form.confirmPassword}
                   onChange={update('confirmPassword')}
                   placeholder="Repeat password"
+                  aria-invalid={!!errors.confirmPassword}
                   className={`w-full px-3 py-2 text-sm rounded-lg border ${
                     errors.confirmPassword ? 'border-red-400 dark:border-red-600' : 'border-neutral-300 dark:border-neutral-700'
                   } bg-white dark:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400`}
@@ -224,20 +233,6 @@ export function AuthPage({ onSuccess }) {
             </button>
 
           </form>
-
-          {/* Footer hint */}
-          {mode === 'login' && (
-            <p className="text-center text-[11px] text-neutral-400 mt-4">
-              Default migration account:{' '}
-              <code className="text-neutral-600 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
-                admin@drachma.local
-              </code>{' '}
-              /{' '}
-              <code className="text-neutral-600 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
-                ChangeMe2026!
-              </code>
-            </p>
-          )}
         </div>
       </div>
     </div>

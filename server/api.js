@@ -77,6 +77,38 @@ function checkRateLimit(req, isWriteOperation = false) {
   return record.count > maxRequests;
 }
 
+// Dedicated Login Brute-Force Rate Limiter (Max 10 failed attempts per 15 minutes per IP)
+const failedLoginMap = new Map();
+
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxFailed = 10;
+  const record = failedLoginMap.get(ip) || { count: 0, resetAt: now + windowMs };
+  if (now > record.resetAt) {
+    record.count = 0;
+    record.resetAt = now + windowMs;
+  }
+  return record.count >= maxFailed;
+}
+
+function recordFailedLoginAttempt(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const record = failedLoginMap.get(ip) || { count: 0, resetAt: now + windowMs };
+  if (now > record.resetAt) {
+    record.count = 1;
+    record.resetAt = now + windowMs;
+  } else {
+    record.count++;
+  }
+  failedLoginMap.set(ip, record);
+}
+
+function clearFailedLoginAttempts(ip) {
+  failedLoginMap.delete(ip);
+}
+
 // Legacy API secret check (still supported for backward compat)
 function authenticateApiKey(req) {
   const secretKey = process.env.API_SECRET_KEY;
@@ -204,19 +236,108 @@ export async function handleApiRequest(req, res, next) {
         args: [userId, name, email, passwordHash, now, now],
       });
 
-      // Create default settings for new user
-      const defaultSettings = [
-        { key: 'theme', value: 'light' },
-        { key: 'currency', value: 'INR' },
-        { key: 'notificationsEnabled', value: 'true' },
-      ];
-      await db.batch(
-        defaultSettings.map((s) => ({
-          sql: 'INSERT OR IGNORE INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?)',
-          args: [s.key, s.value, now, userId],
-        })),
-        'write',
-      );
+      // If this is the first registered real user, reassign any unassigned or legacy migrated records
+      const usersCountRes = await db.execute('SELECT COUNT(*) as count FROM users');
+      const isFirstUser = Number(usersCountRes.rows[0]?.count || 0) <= 1;
+
+      if (isFirstUser) {
+        const tables = ['recurring_items', 'meal_tracker', 'expenses', 'budgets', 'payments', 'settings'];
+        for (const tbl of tables) {
+          try {
+            await db.execute({
+              sql: `UPDATE ${tbl} SET user_id = ? WHERE user_id = 'user-default-migrated' OR user_id IS NULL OR user_id = ''`,
+              args: [userId],
+            });
+          } catch (_) {}
+        }
+      }
+
+      // Create default settings for new user if none exist
+      const settingsCountRes = await db.execute({
+        sql: 'SELECT COUNT(*) as count FROM settings WHERE user_id = ?',
+        args: [userId],
+      });
+      if (Number(settingsCountRes.rows[0]?.count || 0) === 0) {
+        const defaultSettings = [
+          { key: 'theme', value: 'light' },
+          { key: 'currency', value: 'INR' },
+          { key: 'notificationsEnabled', value: 'true' },
+        ];
+        await db.batch(
+          defaultSettings.map((s) => ({
+            sql: 'INSERT OR IGNORE INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?)',
+            args: [s.key, s.value, now, userId],
+          })),
+          'write',
+        );
+      }
+
+      // Create initial meal templates for new user if they don't have any
+      const recurringCountRes = await db.execute({
+        sql: 'SELECT COUNT(*) as count FROM recurring_items WHERE user_id = ?',
+        args: [userId],
+      });
+      if (Number(recurringCountRes.rows[0]?.count || 0) === 0) {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const defaultTemplates = [
+          {
+            id: `rec-lunch-${userId}`,
+            name: 'Lunch',
+            price_per_occurrence: 100,
+            frequency: 'daily',
+            start_date: todayStr,
+            end_date: null,
+            is_active: 1,
+            icon: '🍽️',
+            description: 'Standard Daily Lunch',
+            price_history: JSON.stringify([{ effectiveFrom: todayStr, price: 100 }]),
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: `rec-dinner-${userId}`,
+            name: 'Dinner',
+            price_per_occurrence: 80,
+            frequency: 'daily',
+            start_date: todayStr,
+            end_date: null,
+            is_active: 1,
+            icon: '🍛',
+            description: 'Standard Daily Dinner',
+            price_history: JSON.stringify([{ effectiveFrom: todayStr, price: 80 }]),
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: `rec-tea-${userId}`,
+            name: 'Tea & Snacks',
+            price_per_occurrence: 25,
+            frequency: 'daily',
+            start_date: todayStr,
+            end_date: null,
+            is_active: 1,
+            icon: '☕',
+            description: 'Evening Tea and Light Snacks',
+            price_history: JSON.stringify([{ effectiveFrom: todayStr, price: 25 }]),
+            created_at: now,
+            updated_at: now,
+          },
+        ];
+
+        await db.batch(
+          defaultTemplates.map((item) => ({
+            sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+              item.id, item.name, item.price_per_occurrence, item.frequency,
+              item.start_date, item.end_date, item.is_active, item.icon,
+              item.description, item.price_history, item.created_at, item.updated_at,
+              userId,
+            ],
+          })),
+          'write',
+        );
+      }
 
       const token = signToken({ userId, email, name });
       console.log(`[Auth] User registered: ${email}`);
@@ -238,6 +359,15 @@ export async function handleApiRequest(req, res, next) {
 
   // POST /auth/login
   if (path === '/auth/login' && method === 'POST') {
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '127.0.0.1';
+
+    if (checkLoginRateLimit(clientIp)) {
+      return sendJson(res, 429, {
+        success: false,
+        error: 'Too many failed login attempts. Please wait 15 minutes before trying again.',
+      });
+    }
+
     try {
       const body = await parseJsonBody(req);
       const email = sanitizeInput(body.email, 200).toLowerCase();
@@ -254,6 +384,7 @@ export async function handleApiRequest(req, res, next) {
       const userRow = userRes.rows[0];
 
       if (!userRow) {
+        recordFailedLoginAttempt(clientIp);
         // Constant-time-ish response to avoid user enumeration
         await hashPassword('dummy-to-avoid-timing-attack');
         return sendJson(res, 401, { success: false, error: 'Invalid email or password' });
@@ -261,8 +392,12 @@ export async function handleApiRequest(req, res, next) {
 
       const valid = await verifyPassword(password, String(userRow.password_hash));
       if (!valid) {
+        recordFailedLoginAttempt(clientIp);
         return sendJson(res, 401, { success: false, error: 'Invalid email or password' });
       }
+
+      // Successful login — clear failed attempt count
+      clearFailedLoginAttempts(clientIp);
 
       const userId = String(userRow.id);
       const name = String(userRow.name);

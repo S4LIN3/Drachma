@@ -1,8 +1,11 @@
 import { createClient } from '@libsql/client';
+import { config as loadEnv } from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+loadEnv({ path: path.resolve(__dirname, '../.env') });
+loadEnv();
 
 // Configuration:
 // 1. TURSO_DATABASE_URL + TURSO_AUTH_TOKEN -> Cloud Turso Serverless Database (Vercel)
@@ -248,27 +251,34 @@ export async function initDatabase() {
       // Index creation failures are non-fatal
     }
 
-    // ── 5. Migrate existing data: ensure a default user exists ───────────────
-    const defaultUserRes = await db.execute({
-      sql: 'SELECT id FROM users WHERE id = ? OR email = ?',
-      args: [DEFAULT_USER_ID, 'admin@drachma.local'],
-    });
+    // ── 5. Optional Admin account initialization (from environment only) ──
+    // Production instances do NOT create hardcoded default accounts.
+    // If ADMIN_EMAIL and ADMIN_PASSWORD are provided in .env, seed them securely.
+    const envAdminEmail = (process.env.ADMIN_EMAIL || process.env.DEFAULT_ADMIN_EMAIL || '').trim().toLowerCase();
+    const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.DEFAULT_ADMIN_PASSWORD || '').trim();
+    const envAdminName = (process.env.ADMIN_NAME || process.env.DEFAULT_ADMIN_NAME || 'Administrator').trim();
 
-    if (defaultUserRes.rows.length === 0) {
-      // Import here to avoid circular deps — only needed once
-      const { hashPassword } = await import('./auth.js');
-      const now = new Date().toISOString();
-      const defaultPasswordHash = await hashPassword('ChangeMe2026!');
+    if (envAdminEmail && envAdminPassword) {
+      const adminRes = await db.execute({
+        sql: 'SELECT id FROM users WHERE email = ?',
+        args: [envAdminEmail],
+      });
 
-      try {
-        await db.execute({
-          sql: `INSERT OR IGNORE INTO users (id, name, email, password_hash, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)`,
-          args: [DEFAULT_USER_ID, 'Default User', 'admin@drachma.local', defaultPasswordHash, now, now],
-        });
-        console.log(`[DB] Default migration user created: admin@drachma.local / ChangeMe2026!`);
-      } catch (err) {
-        console.warn(`[DB] Default user insert handled:`, err.message);
+      if (adminRes.rows.length === 0) {
+        const { hashPassword } = await import('./auth.js');
+        const now = new Date().toISOString();
+        const adminPasswordHash = await hashPassword(envAdminPassword);
+
+        try {
+          await db.execute({
+            sql: `INSERT OR IGNORE INTO users (id, name, email, password_hash, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?)`,
+            args: [DEFAULT_USER_ID, envAdminName, envAdminEmail, adminPasswordHash, now, now],
+          });
+          console.log(`[DB] Admin account initialized from environment: ${envAdminEmail}`);
+        } catch (err) {
+          console.warn(`[DB] Admin initialization handled:`, err.message);
+        }
       }
     }
 

@@ -53,9 +53,9 @@ async function runMigration() {
     console.log(`   • Budgets:         ${maintenance.recordsCount.budgets ?? 0}`);
     console.log(`   • Recurring Items: ${maintenance.recordsCount.recurringItems ?? 0}`);
     console.log('────────────────────────────────────────────────────────');
-    console.log('🔑 Default Migrated User Account:');
-    console.log('   • Email:    admin@drachma.local');
-    console.log('   • Password: ChangeMe2026!');
+    console.log('🔐 Authentication & Access:');
+    console.log('   • Production mode: User registration enabled');
+    console.log('   • Optional Admin: Configure ADMIN_EMAIL & ADMIN_PASSWORD in .env');
     console.log('────────────────────────────────────────────────────────');
     console.log('✨ All migrations and data mappings are complete!');
     process.exit(0);
