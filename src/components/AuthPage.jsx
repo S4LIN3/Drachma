@@ -115,9 +115,23 @@ export function AuthPage({ onSuccess }) {
 
             {/* API error */}
             {apiError && (
-              <div className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs">
-                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                <span>{apiError}</span>
+              <div className="p-3 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span className="font-medium">{apiError}</span>
+                </div>
+                {mode === 'login' && (
+                  <p className="text-[11px] text-red-600/90 dark:text-red-400/90 pl-5.5">
+                    Don't have an account on this deployment yet?{' '}
+                    <button
+                      type="button"
+                      onClick={() => switchMode('register')}
+                      className="underline font-semibold hover:text-red-800 dark:hover:text-red-300 transition-colors cursor-pointer"
+                    >
+                      Click here to Create Account
+                    </button>
+                  </p>
+                )}
               </div>
             )}
 

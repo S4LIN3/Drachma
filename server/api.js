@@ -220,8 +220,11 @@ export async function handleApiRequest(req, res, next) {
         return sendJson(res, 400, { success: false, error: 'Password must be at least 8 characters' });
       }
 
-      // Check duplicate email
-      const existing = await db.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
+      // Check duplicate email (case-insensitive)
+      const existing = await db.execute({
+        sql: 'SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))',
+        args: [email],
+      });
       if (existing.rows.length > 0) {
         return sendJson(res, 409, { success: false, error: 'An account with this email already exists' });
       }
@@ -378,13 +381,22 @@ export async function handleApiRequest(req, res, next) {
       }
 
       const userRes = await db.execute({
-        sql: 'SELECT id, name, email, password_hash, created_at FROM users WHERE email = ?',
+        sql: 'SELECT id, name, email, password_hash, created_at FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))',
         args: [email],
       });
       const userRow = userRes.rows[0];
 
       if (!userRow) {
         recordFailedLoginAttempt(clientIp);
+        const countRes = await db.execute('SELECT COUNT(*) as count FROM users');
+        const count = Number(countRes.rows[0]?.count || 0);
+        if (count === 0) {
+          return sendJson(res, 401, {
+            success: false,
+            error: 'No accounts registered yet. Please click "Create Account" to set up your account.',
+            noUsersExist: true,
+          });
+        }
         // Constant-time-ish response to avoid user enumeration
         await hashPassword('dummy-to-avoid-timing-attack');
         return sendJson(res, 401, { success: false, error: 'Invalid email or password' });
@@ -482,9 +494,9 @@ export async function handleApiRequest(req, res, next) {
       if (body.email !== undefined) {
         const email = sanitizeInput(body.email, 200).toLowerCase();
         if (!isValidEmail(email)) return sendJson(res, 400, { success: false, error: 'Valid email required' });
-        // Check uniqueness against other users
+        // Check uniqueness against other users (case-insensitive)
         const existingRes = await db.execute({
-          sql: 'SELECT id FROM users WHERE email = ? AND id != ?',
+          sql: 'SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) AND id != ?',
           args: [email, userId],
         });
         if (existingRes.rows.length > 0) {
