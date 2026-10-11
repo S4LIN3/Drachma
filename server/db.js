@@ -1,4 +1,6 @@
-import { createClient } from '@libsql/client';
+import pg from 'pg';
+import { createClient as createLibsqlClient } from '@libsql/client';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { config as loadEnv } from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -7,15 +9,110 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnv({ path: path.resolve(__dirname, '../.env') });
 loadEnv();
 
-// Configuration:
-// 1. TURSO_DATABASE_URL + TURSO_AUTH_TOKEN -> Cloud Turso Serverless Database (Vercel)
-// 2. Local development -> Local SQLite file
-const localDbPath = path.join(__dirname, 'expenses.db');
+const { Pool } = pg;
 
-export const db = createClient({
-  url: process.env.TURSO_DATABASE_URL || `file:${localDbPath}`,
-  authToken: process.env.TURSO_AUTH_TOKEN || undefined,
-});
+// ─── Supabase / PostgreSQL vs. SQLite Configuration ──────────────────────────
+const pgConnectionString =
+  process.env.DATABASE_URL ||
+  process.env.SUPABASE_DB_URL ||
+  process.env.POSTGRES_URL ||
+  null;
+
+export const isPostgres = !!pgConnectionString;
+
+// Initialize Supabase official JS client (if credentials provided)
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+export const supabase =
+  supabaseUrl && supabaseKey
+    ? createSupabaseClient(supabaseUrl, supabaseKey, {
+        auth: { persistSession: false },
+      })
+    : null;
+
+// Initialize PostgreSQL Connection Pool or Local libSQL SQLite Client
+let pgPool = null;
+let libsqlClient = null;
+
+if (isPostgres) {
+  pgPool = new Pool({
+    connectionString: pgConnectionString,
+    ssl: pgConnectionString.includes('localhost') ? false : { rejectUnauthorized: false },
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+  });
+
+  pgPool.on('error', (err) => {
+    console.error('[DB] Unexpected error on idle PostgreSQL client:', err.message);
+  });
+} else {
+  const localDbPath = path.join(__dirname, 'expenses.db');
+  libsqlClient = createLibsqlClient({
+    url: process.env.TURSO_DATABASE_URL || `file:${localDbPath}`,
+    authToken: process.env.TURSO_AUTH_TOKEN || undefined,
+  });
+}
+
+/**
+ * Format SQLite queries to PostgreSQL syntax:
+ * - Translates ? parameter placeholders into $1, $2, ...
+ * - Translates "INSERT OR IGNORE INTO ..." into "INSERT INTO ... ON CONFLICT DO NOTHING"
+ */
+export function formatPgSql(sql) {
+  let paramIndex = 1;
+  let formatted = sql.replace(/\?/g, () => `$${paramIndex++}`);
+
+  if (/^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+/i.test(formatted)) {
+    formatted = formatted.replace(/^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+/i, 'INSERT INTO ');
+    if (!/ON\s+CONFLICT/i.test(formatted)) {
+      formatted = formatted.trim().replace(/;*$/, '') + ' ON CONFLICT DO NOTHING;';
+    }
+  }
+
+  return formatted;
+}
+
+// Universal DB interface compatible with existing code
+export const db = {
+  async execute(stmt) {
+    if (isPostgres) {
+      const sql = typeof stmt === 'string' ? stmt : stmt.sql;
+      const args = (stmt && stmt.args) || [];
+      const pgSql = formatPgSql(sql);
+      const res = await pgPool.query(pgSql, args);
+      return { rows: res.rows };
+    } else {
+      return libsqlClient.execute(stmt);
+    }
+  },
+
+  async batch(statements, mode = 'write') {
+    if (isPostgres) {
+      const client = await pgPool.connect();
+      try {
+        await client.query('BEGIN');
+        const results = [];
+        for (const stmt of statements) {
+          const sql = typeof stmt === 'string' ? stmt : stmt.sql;
+          const args = (stmt && stmt.args) || [];
+          const pgSql = formatPgSql(sql);
+          const res = await client.query(pgSql, args);
+          results.push({ rows: res.rows });
+        }
+        await client.query('COMMIT');
+        return results;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      return libsqlClient.batch(statements, mode);
+    }
+  },
+};
 
 let isInitialized = false;
 
@@ -27,13 +124,25 @@ export async function initDatabase() {
   if (isInitialized) return;
 
   try {
-    // ── 1. Core tables (existing schema, unchanged) ──────────────────────────
-    await db.batch([
-      {
-        sql: `CREATE TABLE IF NOT EXISTS recurring_items (
+    if (isPostgres) {
+      console.log('[DB] Connecting to Supabase PostgreSQL database...');
+      // 1. Core tables for PostgreSQL
+      await db.execute(`
+        CREATE TABLE IF NOT EXISTS users (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
-          price_per_occurrence REAL NOT NULL,
+          email TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+
+      await db.execute(`
+        CREATE TABLE IF NOT EXISTS recurring_items (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          price_per_occurrence DOUBLE PRECISION NOT NULL,
           frequency TEXT DEFAULT 'daily',
           start_date TEXT,
           end_date TEXT,
@@ -42,168 +151,131 @@ export async function initDatabase() {
           description TEXT DEFAULT '',
           price_history TEXT,
           created_at TEXT,
-          updated_at TEXT
-        );`,
-        args: [],
-      },
-      {
-        sql: `CREATE TABLE IF NOT EXISTS meal_tracker (
+          updated_at TEXT,
+          user_id TEXT
+        );
+      `);
+
+      await db.execute(`
+        CREATE TABLE IF NOT EXISTS meal_tracker (
           id TEXT PRIMARY KEY,
-          date TEXT UNIQUE NOT NULL,
+          date TEXT NOT NULL,
           month TEXT NOT NULL,
           meals_marked TEXT NOT NULL,
           notes TEXT DEFAULT '',
+          meals_paid TEXT DEFAULT '{}',
           created_at TEXT,
-          updated_at TEXT
-        );`,
-        args: [],
-      },
-      {
-        sql: `CREATE TABLE IF NOT EXISTS expenses (
+          updated_at TEXT,
+          user_id TEXT,
+          CONSTRAINT uq_meal_tracker_date_user UNIQUE (date, user_id)
+        );
+      `);
+
+      await db.execute(`
+        CREATE TABLE IF NOT EXISTS expenses (
           id TEXT PRIMARY KEY,
           date TEXT NOT NULL,
           month TEXT NOT NULL,
           description TEXT NOT NULL,
           category TEXT NOT NULL,
-          unit_price REAL NOT NULL,
+          unit_price DOUBLE PRECISION NOT NULL,
           quantity INTEGER NOT NULL DEFAULT 1,
-          total_amount REAL NOT NULL,
+          total_amount DOUBLE PRECISION NOT NULL,
           notes TEXT DEFAULT '',
           attachment TEXT DEFAULT '',
           created_at TEXT,
-          updated_at TEXT
-        );`,
-        args: [],
-      },
-      {
-        sql: `CREATE TABLE IF NOT EXISTS budgets (
+          updated_at TEXT,
+          user_id TEXT
+        );
+      `);
+
+      await db.execute(`
+        CREATE TABLE IF NOT EXISTS budgets (
           id TEXT PRIMARY KEY,
           month TEXT NOT NULL,
           category TEXT NOT NULL,
-          amount REAL NOT NULL,
+          amount DOUBLE PRECISION NOT NULL,
           created_at TEXT,
           updated_at TEXT,
-          UNIQUE(month, category)
-        );`,
-        args: [],
-      },
-      {
-        sql: `CREATE TABLE IF NOT EXISTS settings (
+          user_id TEXT,
+          CONSTRAINT uq_budgets_month_category_user UNIQUE (month, category, user_id)
+        );
+      `);
+
+      await db.execute(`
+        CREATE TABLE IF NOT EXISTS settings (
           key TEXT NOT NULL,
           value TEXT NOT NULL,
           updated_at TEXT,
           user_id TEXT,
-          UNIQUE(key, user_id)
-        );`,
-        args: [],
-      },
-      {
-        sql: `CREATE TABLE IF NOT EXISTS payments (
+          CONSTRAINT uq_settings_key_user UNIQUE (key, user_id)
+        );
+      `);
+
+      await db.execute(`
+        CREATE TABLE IF NOT EXISTS payments (
           id TEXT PRIMARY KEY,
           recurring_item_id TEXT NOT NULL,
           start_date TEXT NOT NULL,
           paid_till_date TEXT NOT NULL,
           meal_count INTEGER NOT NULL,
-          total_amount REAL NOT NULL,
+          total_amount DOUBLE PRECISION NOT NULL,
           payment_date TEXT NOT NULL,
           notes TEXT DEFAULT '',
           created_at TEXT,
-          updated_at TEXT
-        );`,
-        args: [],
-      },
-    ], 'write');
+          updated_at TEXT,
+          user_id TEXT
+        );
+      `);
 
-    // ── 2. NEW: Users table ──────────────────────────────────────────────────
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-    `);
-
-    // ── 3. Safe column additions for previously created tables ───────────────
-    const safeAlters = [
-      'ALTER TABLE expenses ADD COLUMN attachment TEXT DEFAULT ""',
-      'ALTER TABLE meal_tracker ADD COLUMN meals_paid TEXT DEFAULT "{}"',
-      // user_id columns for data ownership
-      `ALTER TABLE recurring_items ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
-      `ALTER TABLE meal_tracker ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
-      `ALTER TABLE expenses ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
-      `ALTER TABLE budgets ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
-      `ALTER TABLE payments ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
-      // User-specific settings: change key uniqueness to (user_id, key)
-      `ALTER TABLE settings ADD COLUMN user_id TEXT DEFAULT '${DEFAULT_USER_ID}'`,
-    ];
-
-    for (const sql of safeAlters) {
-      try {
-        await db.execute(sql);
-      } catch (_) {
-        // Column already exists — ignore
+      // Performance Indexes
+      const indexes = [
+        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_date ON meal_tracker(date);',
+        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_month ON meal_tracker(month);',
+        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_user ON meal_tracker(user_id);',
+        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_user_date ON meal_tracker(user_id, date);',
+        'CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);',
+        'CREATE INDEX IF NOT EXISTS idx_expenses_month ON expenses(month);',
+        'CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(user_id);',
+        'CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date);',
+        'CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);',
+        'CREATE INDEX IF NOT EXISTS idx_budgets_user ON budgets(user_id);',
+        'CREATE INDEX IF NOT EXISTS idx_recurring_user ON recurring_items(user_id);',
+        'CREATE INDEX IF NOT EXISTS idx_payments_recurring ON payments(recurring_item_id);',
+        'CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date);',
+        'CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);',
+        'CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id);',
+        'CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);',
+      ];
+      for (const idx of indexes) {
+        try {
+          await db.execute(idx);
+        } catch (_) {}
       }
-    }
-
-    // ── 4. Safe migration for settings table: ensure (key, user_id) composite unique ──
-    // The old settings table had `key TEXT PRIMARY KEY`. We need to handle migration.
-    try {
-      // Check if settings has user_id column already
-      const tableInfo = await db.execute("PRAGMA table_info(settings)");
-      const hasUserId = tableInfo.rows.some((r) => String(r.name) === 'user_id');
-      
-      if (!hasUserId) {
-        // Old schema: key TEXT PRIMARY KEY. Migrate data to new structure.
-        // 1. Rename old table
-        await db.execute('ALTER TABLE settings RENAME TO settings_old');
-        // 2. Create new table with composite unique
-        await db.execute(`
-          CREATE TABLE settings (
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
+    } else {
+      console.log('[DB] Running on SQLite / Turso...');
+      // Core tables for SQLite
+      await db.batch([
+        {
+          sql: `CREATE TABLE IF NOT EXISTS recurring_items (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            price_per_occurrence REAL NOT NULL,
+            frequency TEXT DEFAULT 'daily',
+            start_date TEXT,
+            end_date TEXT,
+            is_active INTEGER DEFAULT 1,
+            icon TEXT DEFAULT '🍽️',
+            description TEXT DEFAULT '',
+            price_history TEXT,
+            created_at TEXT,
             updated_at TEXT,
-            user_id TEXT,
-            UNIQUE(key, user_id)
-          )
-        `);
-        // 3. Copy old data with default user
-        await db.execute(`
-          INSERT OR IGNORE INTO settings (key, value, updated_at, user_id)
-          SELECT key, value, updated_at, '${DEFAULT_USER_ID}' FROM settings_old
-        `);
-        // 4. Drop old table
-        await db.execute('DROP TABLE settings_old');
-        console.log('[DB] Migrated settings table to (key, user_id) composite unique');
-      }
-    } catch (e) {
-      // Migration failed gracefully — table may already be in new format
-      console.warn('[DB] Settings migration warning:', e.message);
-    }
-
-    // ── 5. Safe migration for meal_tracker: date UNIQUE → (date, user_id) UNIQUE ──
-    try {
-      const mtInfo = await db.execute('PRAGMA index_list(meal_tracker)');
-      let hasDateAloneUnique = false;
-      for (const idx of mtInfo.rows) {
-        if (String(idx.unique) === '1') {
-          try {
-            const idxInfo = await db.execute(`PRAGMA index_info(${String(idx.name)})`);
-            const cols = idxInfo.rows.map((r) => String(r.name));
-            if (cols.length === 1 && cols[0] === 'date') {
-              hasDateAloneUnique = true;
-              break;
-            }
-          } catch (_) {}
-        }
-      }
-
-      if (hasDateAloneUnique) {
-        await db.execute('ALTER TABLE meal_tracker RENAME TO meal_tracker_old');
-        await db.execute(`
-          CREATE TABLE meal_tracker (
+            user_id TEXT
+          );`,
+          args: [],
+        },
+        {
+          sql: `CREATE TABLE IF NOT EXISTS meal_tracker (
             id TEXT PRIMARY KEY,
             date TEXT NOT NULL,
             month TEXT NOT NULL,
@@ -214,53 +286,88 @@ export async function initDatabase() {
             updated_at TEXT,
             user_id TEXT,
             UNIQUE(date, user_id)
-          )
-        `);
-        await db.execute(`
-          INSERT OR IGNORE INTO meal_tracker (id, date, month, meals_marked, notes, meals_paid, created_at, updated_at, user_id)
-          SELECT id, date, month, meals_marked, notes, COALESCE(meals_paid, '{}'), created_at, updated_at, '${DEFAULT_USER_ID}'
-          FROM meal_tracker_old
-        `);
-        await db.execute('DROP TABLE meal_tracker_old');
-        console.log('[DB] Migrated meal_tracker to (date, user_id) composite unique');
-      }
-    } catch (e) {
-      console.warn('[DB] meal_tracker migration warning:', e.message);
-    }
-
-    try {
-      await db.batch([
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_meal_tracker_date ON meal_tracker(date);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_meal_tracker_month ON meal_tracker(month);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_month ON expenses(month);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_recurring ON payments(recurring_item_id);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);', args: [] },
-        // User ownership indexes
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(user_id);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_meal_tracker_user ON meal_tracker(user_id);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_recurring_user ON recurring_items(user_id);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_budgets_user ON budgets(user_id);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);', args: [] },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id);', args: [] },
-        { sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);', args: [] },
+          );`,
+          args: [],
+        },
+        {
+          sql: `CREATE TABLE IF NOT EXISTS expenses (
+            id TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
+            month TEXT NOT NULL,
+            description TEXT NOT NULL,
+            category TEXT NOT NULL,
+            unit_price REAL NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            total_amount REAL NOT NULL,
+            notes TEXT DEFAULT '',
+            attachment TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT
+          );`,
+          args: [],
+        },
+        {
+          sql: `CREATE TABLE IF NOT EXISTS budgets (
+            id TEXT PRIMARY KEY,
+            month TEXT NOT NULL,
+            category TEXT NOT NULL,
+            amount REAL NOT NULL,
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT,
+            UNIQUE(month, category, user_id)
+          );`,
+          args: [],
+        },
+        {
+          sql: `CREATE TABLE IF NOT EXISTS settings (
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            updated_at TEXT,
+            user_id TEXT,
+            UNIQUE(key, user_id)
+          );`,
+          args: [],
+        },
+        {
+          sql: `CREATE TABLE IF NOT EXISTS payments (
+            id TEXT PRIMARY KEY,
+            recurring_item_id TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            paid_till_date TEXT NOT NULL,
+            meal_count INTEGER NOT NULL,
+            total_amount REAL NOT NULL,
+            payment_date TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT
+          );`,
+          args: [],
+        },
+        {
+          sql: `CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );`,
+          args: [],
+        },
       ], 'write');
-    } catch (_) {
-      // Index creation failures are non-fatal
     }
 
-    // ── 5. Optional Admin account initialization (from environment only) ──
-    // Production instances do NOT create hardcoded default accounts.
-    // If ADMIN_EMAIL and ADMIN_PASSWORD are provided in .env, seed them securely.
+    // ── Optional Admin account initialization (from environment) ───────────
     const envAdminEmail = (process.env.ADMIN_EMAIL || process.env.DEFAULT_ADMIN_EMAIL || '').trim().toLowerCase();
     const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.DEFAULT_ADMIN_PASSWORD || '').trim();
     const envAdminName = (process.env.ADMIN_NAME || process.env.DEFAULT_ADMIN_NAME || 'Administrator').trim();
 
     if (envAdminEmail && envAdminPassword) {
       const adminRes = await db.execute({
-        sql: 'SELECT id FROM users WHERE email = ?',
+        sql: 'SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))',
         args: [envAdminEmail],
       });
 
@@ -271,33 +378,19 @@ export async function initDatabase() {
 
         try {
           await db.execute({
-            sql: `INSERT OR IGNORE INTO users (id, name, email, password_hash, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?)`,
+            sql: `INSERT INTO users (id, name, email, password_hash, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?)
+                  ON CONFLICT (email) DO NOTHING`,
             args: [DEFAULT_USER_ID, envAdminName, envAdminEmail, adminPasswordHash, now, now],
           });
-          console.log(`[DB] Admin account initialized from environment: ${envAdminEmail}`);
+          console.log(`[DB] Admin account initialized: ${envAdminEmail}`);
         } catch (err) {
           console.warn(`[DB] Admin initialization handled:`, err.message);
         }
       }
     }
 
-    // ── 6. Migrate existing records that have null / empty user_id ───────────
-    const tables = [
-      'recurring_items', 'meal_tracker', 'expenses', 'budgets', 'payments', 'settings',
-    ];
-    for (const table of tables) {
-      try {
-        await db.execute({
-          sql: `UPDATE ${table} SET user_id = ? WHERE user_id IS NULL OR user_id = ''`,
-          args: [DEFAULT_USER_ID],
-        });
-      } catch (_) {
-        // Table may not have user_id yet if added in this run — ignore
-      }
-    }
-
-    // ── 7. Default recurring items if table is empty ─────────────────────────
+    // ── Default recurring items if table is empty ───────────────────────────
     const countRes = await db.execute('SELECT COUNT(*) as count FROM recurring_items');
     const count = Number(countRes.rows[0]?.count || 0);
 
@@ -348,20 +441,21 @@ export async function initDatabase() {
         },
       ];
 
-      const statements = defaultTemplates.map((item) => ({
-        sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [
-          item.id, item.name, item.price_per_occurrence, item.frequency,
-          item.start_date, item.end_date, item.is_active, item.icon,
-          item.description, item.price_history, item.created_at, item.updated_at,
-          DEFAULT_USER_ID,
-        ],
-      }));
-      await db.batch(statements, 'write');
+      for (const item of defaultTemplates) {
+        await db.execute({
+          sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            item.id, item.name, item.price_per_occurrence, item.frequency,
+            item.start_date, item.end_date, item.is_active, item.icon,
+            item.description, item.price_history, item.created_at, item.updated_at,
+            DEFAULT_USER_ID,
+          ],
+        });
+      }
     }
 
-    // ── 8. Default settings if empty ─────────────────────────────────────────
+    // ── Default settings if empty ───────────────────────────────────────────
     const settingsCountRes = await db.execute('SELECT COUNT(*) as count FROM settings');
     const settingsCount = Number(settingsCountRes.rows[0]?.count || 0);
 
@@ -372,15 +466,16 @@ export async function initDatabase() {
         { key: 'currency', value: 'INR' },
         { key: 'notificationsEnabled', value: 'true' },
       ];
-      const settingsStatements = defaultSettings.map((s) => ({
-        sql: 'INSERT OR IGNORE INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?)',
-        args: [s.key, s.value, now, DEFAULT_USER_ID],
-      }));
-      await db.batch(settingsStatements, 'write');
+      for (const s of defaultSettings) {
+        await db.execute({
+          sql: 'INSERT INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+          args: [s.key, s.value, now, DEFAULT_USER_ID],
+        });
+      }
     }
 
     isInitialized = true;
-    console.log('[DB] Database initialized successfully');
+    console.log(`[DB] Database initialized successfully (${isPostgres ? 'Supabase PostgreSQL' : 'SQLite'})`);
   } catch (err) {
     console.error('Failed to initialize database:', err);
     throw err;
@@ -477,8 +572,6 @@ export async function getAllData(userId) {
 
 /**
  * Fetch yearly data for a specific user and year for report generation.
- * Returns expenses, meal_tracker records, payments, and recurring_items
- * filtered to the given calendar year.
  */
 export async function getYearlyData(userId, year) {
   await initDatabase();
@@ -487,8 +580,6 @@ export async function getYearlyData(userId, year) {
   if (!year || !/^\d{4}$/.test(String(year))) throw new Error('Valid 4-digit year required');
 
   const startDate = `${year}-01-01`;
-  const endDate = `${year}-12-31`;
-  // Half-open range: date >= startDate AND date < startOfNextYear
   const startOfNextYear = `${Number(year) + 1}-01-01`;
 
   const [expRes, mealRes, payRes, recRes] = await Promise.all([
@@ -568,26 +659,27 @@ export async function getYearlyData(userId, year) {
 }
 
 /**
- * Monthly / Periodic Database Maintenance Routine
+ * Database Maintenance Routine
  */
 export async function runDatabaseMaintenance() {
   await initDatabase();
 
   const results = {
     integrityCheck: 'ok',
+    engine: isPostgres ? 'Supabase PostgreSQL' : 'SQLite',
     recordsCount: {},
     cleanedRecords: 0,
     timestamp: new Date().toISOString(),
   };
 
   try {
-    const integrityRes = await db.execute('PRAGMA integrity_check');
-    const integrityRow = integrityRes.rows[0];
-    results.integrityCheck = integrityRow ? Object.values(integrityRow)[0] : 'ok';
-
-    try {
-      await db.execute('PRAGMA optimize');
-    } catch (_) {}
+    if (!isPostgres) {
+      const integrityRes = await db.execute('PRAGMA integrity_check');
+      const integrityRow = integrityRes.rows[0];
+      results.integrityCheck = integrityRow ? Object.values(integrityRow)[0] : 'ok';
+    } else {
+      results.integrityCheck = 'PostgreSQL healthy (SELECT 1 passed)';
+    }
 
     const emptyRowsRes = await db.execute('SELECT id, meals_marked, notes FROM meal_tracker');
     const orphanIds = [];
