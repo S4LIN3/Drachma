@@ -131,130 +131,96 @@ export async function initDatabase() {
   try {
     if (isPostgres) {
       console.log('[DB] Connecting to Supabase PostgreSQL database...');
-      // 1. Core tables for PostgreSQL
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          email TEXT NOT NULL UNIQUE,
-          password_hash TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-      `);
 
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS recurring_items (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          price_per_occurrence DOUBLE PRECISION NOT NULL,
-          frequency TEXT DEFAULT 'daily',
-          start_date TEXT,
-          end_date TEXT,
-          is_active INTEGER DEFAULT 1,
-          icon TEXT DEFAULT '🍽️',
-          description TEXT DEFAULT '',
-          price_history TEXT,
-          created_at TEXT,
-          updated_at TEXT,
-          user_id TEXT
-        );
-      `);
-
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS meal_tracker (
-          id TEXT PRIMARY KEY,
-          date TEXT NOT NULL,
-          month TEXT NOT NULL,
-          meals_marked TEXT NOT NULL,
-          notes TEXT DEFAULT '',
-          meals_paid TEXT DEFAULT '{}',
-          created_at TEXT,
-          updated_at TEXT,
-          user_id TEXT,
-          CONSTRAINT uq_meal_tracker_date_user UNIQUE (date, user_id)
-        );
-      `);
-
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS expenses (
-          id TEXT PRIMARY KEY,
-          date TEXT NOT NULL,
-          month TEXT NOT NULL,
-          description TEXT NOT NULL,
-          category TEXT NOT NULL,
-          unit_price DOUBLE PRECISION NOT NULL,
-          quantity INTEGER NOT NULL DEFAULT 1,
-          total_amount DOUBLE PRECISION NOT NULL,
-          notes TEXT DEFAULT '',
-          attachment TEXT DEFAULT '',
-          created_at TEXT,
-          updated_at TEXT,
-          user_id TEXT
-        );
-      `);
-
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS budgets (
-          id TEXT PRIMARY KEY,
-          month TEXT NOT NULL,
-          category TEXT NOT NULL,
-          amount DOUBLE PRECISION NOT NULL,
-          created_at TEXT,
-          updated_at TEXT,
-          user_id TEXT,
-          CONSTRAINT uq_budgets_month_category_user UNIQUE (month, category, user_id)
-        );
-      `);
-
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS settings (
-          key TEXT NOT NULL,
-          value TEXT NOT NULL,
-          updated_at TEXT,
-          user_id TEXT,
-          CONSTRAINT uq_settings_key_user UNIQUE (key, user_id)
-        );
-      `);
-
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS payments (
-          id TEXT PRIMARY KEY,
-          recurring_item_id TEXT NOT NULL,
-          start_date TEXT NOT NULL,
-          paid_till_date TEXT NOT NULL,
-          meal_count INTEGER NOT NULL,
-          total_amount DOUBLE PRECISION NOT NULL,
-          payment_date TEXT NOT NULL,
-          notes TEXT DEFAULT '',
-          created_at TEXT,
-          updated_at TEXT,
-          user_id TEXT
-        );
-      `);
-
-      const indexes = [
-        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_date ON meal_tracker(date);',
-        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_month ON meal_tracker(month);',
-        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_user ON meal_tracker(user_id);',
-        'CREATE INDEX IF NOT EXISTS idx_meal_tracker_user_date ON meal_tracker(user_id, date);',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_month ON expenses(month);',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(user_id);',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date);',
-        'CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);',
-        'CREATE INDEX IF NOT EXISTS idx_budgets_user ON budgets(user_id);',
-        'CREATE INDEX IF NOT EXISTS idx_recurring_user ON recurring_items(user_id);',
-        'CREATE INDEX IF NOT EXISTS idx_payments_recurring ON payments(recurring_item_id);',
-        'CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date);',
-        'CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);',
-        'CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id);',
-        'CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);',
-      ];
-      for (const idx of indexes) {
-        try {
-          await db.execute(idx);
-        } catch (_) {}
+      // In production the schema is already applied via supabase_schema.sql.
+      // Just verify connectivity — avoid DDL that conflicts with existing constraints/RLS.
+      if (process.env.NODE_ENV === 'production') {
+        await db.execute('SELECT 1');
+        console.log('[DB] Supabase PostgreSQL connection verified.');
+      } else {
+        // Development: create tables if missing
+        const tables = [
+          `CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          )`,
+          `CREATE TABLE IF NOT EXISTS recurring_items (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            price_per_occurrence DOUBLE PRECISION NOT NULL,
+            frequency TEXT DEFAULT 'daily',
+            start_date TEXT,
+            end_date TEXT,
+            is_active INTEGER DEFAULT 1,
+            icon TEXT DEFAULT '🍽️',
+            description TEXT DEFAULT '',
+            price_history TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT
+          )`,
+          `CREATE TABLE IF NOT EXISTS meal_tracker (
+            id TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
+            month TEXT NOT NULL,
+            meals_marked TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            meals_paid TEXT DEFAULT '{}',
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT
+          )`,
+          `CREATE TABLE IF NOT EXISTS expenses (
+            id TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
+            month TEXT NOT NULL,
+            description TEXT NOT NULL,
+            category TEXT NOT NULL,
+            unit_price DOUBLE PRECISION NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            total_amount DOUBLE PRECISION NOT NULL,
+            notes TEXT DEFAULT '',
+            attachment TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT
+          )`,
+          `CREATE TABLE IF NOT EXISTS budgets (
+            id TEXT PRIMARY KEY,
+            month TEXT NOT NULL,
+            category TEXT NOT NULL,
+            amount DOUBLE PRECISION NOT NULL,
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT
+          )`,
+          `CREATE TABLE IF NOT EXISTS settings (
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            updated_at TEXT,
+            user_id TEXT
+          )`,
+          `CREATE TABLE IF NOT EXISTS payments (
+            id TEXT PRIMARY KEY,
+            recurring_item_id TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            paid_till_date TEXT NOT NULL,
+            meal_count INTEGER NOT NULL,
+            total_amount DOUBLE PRECISION NOT NULL,
+            payment_date TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT,
+            user_id TEXT
+          )`,
+        ];
+        for (const sql of tables) {
+          try { await db.execute(sql); } catch (_) {}
+        }
       }
     } else {
       console.log('[DB] Running on SQLite / Turso...');
