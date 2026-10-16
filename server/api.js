@@ -191,7 +191,9 @@ export async function handleApiRequest(req, res, next) {
     return sendJson(res, 429, { success: false, error: 'Too many requests. Please slow down.' });
   }
 
-  const url = req.url.split('?')[0];
+  // Handle Vercel serverless rewritten URL or native Express URL
+  const rawUrl = req.headers['x-forwarded-uri'] || req.headers['x-matched-path'] || req.url || '';
+  const url = rawUrl.split('?')[0];
   const path = url.replace(/^\/api/, '') || '/';
 
   // Ensure DB is initialized

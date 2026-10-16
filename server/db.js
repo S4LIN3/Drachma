@@ -22,7 +22,12 @@ export const isPostgres = !!pgConnectionString;
 
 // Initialize Supabase official JS client (if credentials provided)
 const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+const supabaseKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_PUBLISHABLE_KEY ||
+  '';
 export const supabase =
   supabaseUrl && supabaseKey
     ? createSupabaseClient(supabaseUrl, supabaseKey, {
@@ -38,9 +43,10 @@ if (isPostgres) {
   pgPool = new Pool({
     connectionString: pgConnectionString,
     ssl: pgConnectionString.includes('localhost') ? false : { rejectUnauthorized: false },
-    max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
+    // Serverless-friendly pool sizing: keeps idle connection count low to avoid exhausting Supabase pooler
+    max: parseInt(process.env.PG_POOL_MAX || '3', 10),
+    idleTimeoutMillis: 15000,
+    connectionTimeoutMillis: 10000,
   });
 
   pgPool.on('error', (err) => {
