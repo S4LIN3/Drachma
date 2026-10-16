@@ -201,7 +201,11 @@ export async function handleApiRequest(req, res, next) {
     await initDatabase();
   } catch (err) {
     console.error('Failed DB init:', err);
-    return sendJson(res, 500, { success: false, error: 'Database service unavailable' });
+    return sendJson(res, 500, {
+      success: false,
+      error: 'Database service unavailable',
+      details: err.message,
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
