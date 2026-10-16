@@ -11,7 +11,7 @@ loadEnv();
 
 const { Pool } = pg;
 
-// ─── Supabase / PostgreSQL vs. SQLite Configuration ──────────────────────────
+// ─── Database Configuration ──────────────────────────────────────────────────
 const pgConnectionString =
   process.env.DATABASE_URL ||
   process.env.SUPABASE_DB_URL ||
@@ -20,7 +20,7 @@ const pgConnectionString =
 
 export const isPostgres = !!pgConnectionString;
 
-// Initialize Supabase official JS client (if credentials provided)
+// Initialize Supabase official JS client (optional, for client-side / SDK integrations)
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -28,6 +28,7 @@ const supabaseKey =
   process.env.SUPABASE_ANON_KEY ||
   process.env.SUPABASE_PUBLISHABLE_KEY ||
   '';
+
 export const supabase =
   supabaseUrl && supabaseKey
     ? createSupabaseClient(supabaseUrl, supabaseKey, {
@@ -35,7 +36,7 @@ export const supabase =
       })
     : null;
 
-// Initialize PostgreSQL Connection Pool or Local libSQL SQLite Client
+// Initialize PostgreSQL Connection Pool or Local SQLite fallback
 let pgPool = null;
 let libsqlClient = null;
 
@@ -43,7 +44,6 @@ if (isPostgres) {
   pgPool = new Pool({
     connectionString: pgConnectionString,
     ssl: pgConnectionString.includes('localhost') ? false : { rejectUnauthorized: false },
-    // Serverless-friendly pool sizing: keeps idle connection count low to avoid exhausting Supabase pooler
     max: parseInt(process.env.PG_POOL_MAX || '3', 10),
     idleTimeoutMillis: 15000,
     connectionTimeoutMillis: 10000,
@@ -79,7 +79,7 @@ export function formatPgSql(sql) {
   return formatted;
 }
 
-// Universal DB interface compatible with existing code
+// Universal DB interface
 export const db = {
   async execute(stmt) {
     if (isPostgres) {
@@ -122,7 +122,6 @@ export const db = {
 
 let isInitialized = false;
 
-// ─── Default user ID for pre-existing (migrated) data ───────────────────────
 export const DEFAULT_USER_ID = 'user-default-migrated';
 
 // Initialize Database Schema asynchronously
@@ -234,7 +233,6 @@ export async function initDatabase() {
         );
       `);
 
-      // Performance Indexes
       const indexes = [
         'CREATE INDEX IF NOT EXISTS idx_meal_tracker_date ON meal_tracker(date);',
         'CREATE INDEX IF NOT EXISTS idx_meal_tracker_month ON meal_tracker(month);',
@@ -260,7 +258,6 @@ export async function initDatabase() {
       }
     } else {
       console.log('[DB] Running on SQLite / Turso...');
-      // Core tables for SQLite
       await db.batch([
         {
           sql: `CREATE TABLE IF NOT EXISTS recurring_items (
@@ -366,120 +363,6 @@ export async function initDatabase() {
       ], 'write');
     }
 
-    // ── Optional Admin account initialization (from environment) ───────────
-    const envAdminEmail = (process.env.ADMIN_EMAIL || process.env.DEFAULT_ADMIN_EMAIL || '').trim().toLowerCase();
-    const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.DEFAULT_ADMIN_PASSWORD || '').trim();
-    const envAdminName = (process.env.ADMIN_NAME || process.env.DEFAULT_ADMIN_NAME || 'Administrator').trim();
-
-    if (envAdminEmail && envAdminPassword) {
-      const adminRes = await db.execute({
-        sql: 'SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))',
-        args: [envAdminEmail],
-      });
-
-      if (adminRes.rows.length === 0) {
-        const { hashPassword } = await import('./auth.js');
-        const now = new Date().toISOString();
-        const adminPasswordHash = await hashPassword(envAdminPassword);
-
-        try {
-          await db.execute({
-            sql: `INSERT INTO users (id, name, email, password_hash, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?)
-                  ON CONFLICT (email) DO NOTHING`,
-            args: [DEFAULT_USER_ID, envAdminName, envAdminEmail, adminPasswordHash, now, now],
-          });
-          console.log(`[DB] Admin account initialized: ${envAdminEmail}`);
-        } catch (err) {
-          console.warn(`[DB] Admin initialization handled:`, err.message);
-        }
-      }
-    }
-
-    // ── Default recurring items if table is empty ───────────────────────────
-    const countRes = await db.execute('SELECT COUNT(*) as count FROM recurring_items');
-    const count = Number(countRes.rows[0]?.count || 0);
-
-    if (count === 0) {
-      const now = new Date().toISOString();
-      const defaultTemplates = [
-        {
-          id: 'rec-lunch-default',
-          name: 'Lunch',
-          price_per_occurrence: 100,
-          frequency: 'daily',
-          start_date: '2026-01-01',
-          end_date: null,
-          is_active: 1,
-          icon: '🍽️',
-          description: 'Standard Daily Lunch',
-          price_history: JSON.stringify([{ effectiveFrom: '2026-01-01', price: 100 }]),
-          created_at: now,
-          updated_at: now,
-        },
-        {
-          id: 'rec-dinner-default',
-          name: 'Dinner',
-          price_per_occurrence: 80,
-          frequency: 'daily',
-          start_date: '2026-01-01',
-          end_date: null,
-          is_active: 1,
-          icon: '🍛',
-          description: 'Standard Daily Dinner',
-          price_history: JSON.stringify([{ effectiveFrom: '2026-01-01', price: 80 }]),
-          created_at: now,
-          updated_at: now,
-        },
-        {
-          id: 'rec-tea-default',
-          name: 'Tea & Snacks',
-          price_per_occurrence: 25,
-          frequency: 'daily',
-          start_date: '2026-01-01',
-          end_date: null,
-          is_active: 1,
-          icon: '☕',
-          description: 'Evening Tea and Light Snacks',
-          price_history: JSON.stringify([{ effectiveFrom: '2026-01-01', price: 25 }]),
-          created_at: now,
-          updated_at: now,
-        },
-      ];
-
-      for (const item of defaultTemplates) {
-        await db.execute({
-          sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [
-            item.id, item.name, item.price_per_occurrence, item.frequency,
-            item.start_date, item.end_date, item.is_active, item.icon,
-            item.description, item.price_history, item.created_at, item.updated_at,
-            DEFAULT_USER_ID,
-          ],
-        });
-      }
-    }
-
-    // ── Default settings if empty ───────────────────────────────────────────
-    const settingsCountRes = await db.execute('SELECT COUNT(*) as count FROM settings');
-    const settingsCount = Number(settingsCountRes.rows[0]?.count || 0);
-
-    if (settingsCount === 0) {
-      const now = new Date().toISOString();
-      const defaultSettings = [
-        { key: 'theme', value: 'light' },
-        { key: 'currency', value: 'INR' },
-        { key: 'notificationsEnabled', value: 'true' },
-      ];
-      for (const s of defaultSettings) {
-        await db.execute({
-          sql: 'INSERT INTO settings (key, value, updated_at, user_id) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
-          args: [s.key, s.value, now, DEFAULT_USER_ID],
-        });
-      }
-    }
-
     isInitialized = true;
     console.log(`[DB] Database initialized successfully (${isPostgres ? 'Supabase PostgreSQL' : 'SQLite'})`);
   } catch (err) {
@@ -514,7 +397,7 @@ export async function getAllData(userId) {
     isActive: Number(r.is_active) === 1 || r.is_active === true,
     icon: String(r.icon || '🍽️'),
     description: String(r.description || ''),
-    priceHistory: r.price_history ? JSON.parse(String(r.price_history)) : [],
+    priceHistory: typeof r.price_history === 'string' ? (r.price_history ? JSON.parse(String(r.price_history)) : []) : (r.price_history || []),
     createdAt: r.created_at ? String(r.created_at) : null,
     updatedAt: r.updated_at ? String(r.updated_at) : null,
   }));
@@ -523,8 +406,8 @@ export async function getAllData(userId) {
     id: String(m.id),
     date: String(m.date),
     month: String(m.month),
-    mealsMarked: m.meals_marked ? JSON.parse(String(m.meals_marked)) : {},
-    mealsPaid: m.meals_paid ? JSON.parse(String(m.meals_paid)) : {},
+    mealsMarked: typeof m.meals_marked === 'string' ? (m.meals_marked ? JSON.parse(String(m.meals_marked)) : {}) : (m.meals_marked || {}),
+    mealsPaid: typeof m.meals_paid === 'string' ? (m.meals_paid ? JSON.parse(String(m.meals_paid)) : {}) : (m.meals_paid || {}),
     notes: m.notes ? String(m.notes) : '',
     createdAt: m.created_at ? String(m.created_at) : null,
     updatedAt: m.updated_at ? String(m.updated_at) : null,
@@ -619,49 +502,47 @@ export async function getYearlyData(userId, year) {
     }),
   ]);
 
-  const expenses = expRes.rows.map((e) => ({
-    id: String(e.id),
-    date: String(e.date),
-    month: String(e.month),
-    description: String(e.description),
-    category: String(e.category),
-    unitPrice: Number(e.unit_price),
-    quantity: Number(e.quantity),
-    totalAmount: Number(e.total_amount),
-    notes: e.notes ? String(e.notes) : '',
-    createdAt: e.created_at ? String(e.created_at) : null,
-  }));
-
-  const mealTracker = mealRes.rows.map((m) => ({
-    id: String(m.id),
-    date: String(m.date),
-    month: String(m.month),
-    mealsMarked: m.meals_marked ? JSON.parse(String(m.meals_marked)) : {},
-    mealsPaid: m.meals_paid ? JSON.parse(String(m.meals_paid)) : {},
-    notes: m.notes ? String(m.notes) : '',
-  }));
-
-  const payments = payRes.rows.map((p) => ({
-    id: String(p.id),
-    recurringItemId: String(p.recurring_item_id),
-    startDate: String(p.start_date),
-    paidTillDate: String(p.paid_till_date),
-    mealCount: Number(p.meal_count),
-    totalAmount: Number(p.total_amount),
-    paymentDate: String(p.payment_date),
-    notes: p.notes ? String(p.notes) : '',
-  }));
-
-  const recurringItems = recRes.rows.map((r) => ({
-    id: String(r.id),
-    name: String(r.name),
-    pricePerOccurrence: Number(r.price_per_occurrence),
-    frequency: String(r.frequency || 'daily'),
-    icon: String(r.icon || '🍽️'),
-    priceHistory: r.price_history ? JSON.parse(String(r.price_history)) : [],
-  }));
-
-  return { expenses, mealTracker, payments, recurringItems, year: Number(year) };
+  return {
+    expenses: expRes.rows.map((e) => ({
+      id: String(e.id),
+      date: String(e.date),
+      month: String(e.month),
+      description: String(e.description),
+      category: String(e.category),
+      unitPrice: Number(e.unit_price),
+      quantity: Number(e.quantity),
+      totalAmount: Number(e.total_amount),
+      notes: e.notes ? String(e.notes) : '',
+      createdAt: e.created_at ? String(e.created_at) : null,
+    })),
+    mealTracker: mealRes.rows.map((m) => ({
+      id: String(m.id),
+      date: String(m.date),
+      month: String(m.month),
+      mealsMarked: typeof m.meals_marked === 'string' ? (m.meals_marked ? JSON.parse(String(m.meals_marked)) : {}) : (m.meals_marked || {}),
+      mealsPaid: typeof m.meals_paid === 'string' ? (m.meals_paid ? JSON.parse(String(m.meals_paid)) : {}) : (m.meals_paid || {}),
+      notes: m.notes ? String(m.notes) : '',
+    })),
+    payments: payRes.rows.map((p) => ({
+      id: String(p.id),
+      recurringItemId: String(p.recurring_item_id),
+      startDate: String(p.start_date),
+      paidTillDate: String(p.paid_till_date),
+      mealCount: Number(p.meal_count),
+      totalAmount: Number(p.total_amount),
+      paymentDate: String(p.payment_date),
+      notes: p.notes ? String(p.notes) : '',
+    })),
+    recurringItems: recRes.rows.map((r) => ({
+      id: String(r.id),
+      name: String(r.name),
+      pricePerOccurrence: Number(r.price_per_occurrence),
+      frequency: String(r.frequency || 'daily'),
+      icon: String(r.icon || '🍽️'),
+      priceHistory: typeof r.price_history === 'string' ? (r.price_history ? JSON.parse(String(r.price_history)) : []) : (r.price_history || []),
+    })),
+    year: Number(year),
+  };
 }
 
 /**
@@ -679,48 +560,22 @@ export async function runDatabaseMaintenance() {
   };
 
   try {
-    if (!isPostgres) {
-      const integrityRes = await db.execute('PRAGMA integrity_check');
-      const integrityRow = integrityRes.rows[0];
-      results.integrityCheck = integrityRow ? Object.values(integrityRow)[0] : 'ok';
-    } else {
-      results.integrityCheck = 'PostgreSQL healthy (SELECT 1 passed)';
-    }
-
-    const emptyRowsRes = await db.execute('SELECT id, meals_marked, notes FROM meal_tracker');
-    const orphanIds = [];
-    for (const row of emptyRowsRes.rows) {
-      const marks = row.meals_marked ? JSON.parse(String(row.meals_marked)) : {};
-      const hasMarked = Object.values(marks).some(Boolean);
-      const hasNotes = !!(row.notes && String(row.notes).trim());
-      if (!hasMarked && !hasNotes) {
-        orphanIds.push(String(row.id));
-      }
-    }
-
-    if (orphanIds.length > 0) {
-      for (const id of orphanIds) {
-        await db.execute({ sql: 'DELETE FROM meal_tracker WHERE id = ?', args: [id] });
-      }
-      results.cleanedRecords = orphanIds.length;
-    }
-
     const [recC, mealC, expC, bgtC, payC, usrC] = await Promise.all([
-      db.execute('SELECT COUNT(*) as c FROM recurring_items'),
-      db.execute('SELECT COUNT(*) as c FROM meal_tracker'),
-      db.execute('SELECT COUNT(*) as c FROM expenses'),
-      db.execute('SELECT COUNT(*) as c FROM budgets'),
-      db.execute('SELECT COUNT(*) as c FROM payments'),
-      db.execute('SELECT COUNT(*) as c FROM users'),
+      db.execute('SELECT COUNT(*) as count FROM recurring_items'),
+      db.execute('SELECT COUNT(*) as count FROM meal_tracker'),
+      db.execute('SELECT COUNT(*) as count FROM expenses'),
+      db.execute('SELECT COUNT(*) as count FROM budgets'),
+      db.execute('SELECT COUNT(*) as count FROM payments'),
+      db.execute('SELECT COUNT(*) as count FROM users'),
     ]);
 
     results.recordsCount = {
-      users: Number(usrC.rows[0]?.c || 0),
-      recurringItems: Number(recC.rows[0]?.c || 0),
-      mealTrackerDays: Number(mealC.rows[0]?.c || 0),
-      expenses: Number(expC.rows[0]?.c || 0),
-      budgets: Number(bgtC.rows[0]?.c || 0),
-      payments: Number(payC.rows[0]?.c || 0),
+      users: Number(usrC.rows[0]?.count || 0),
+      recurringItems: Number(recC.rows[0]?.count || 0),
+      mealTrackerDays: Number(mealC.rows[0]?.count || 0),
+      expenses: Number(expC.rows[0]?.count || 0),
+      budgets: Number(bgtC.rows[0]?.count || 0),
+      payments: Number(payC.rows[0]?.count || 0),
     };
   } catch (err) {
     console.error('Maintenance routine warning:', err);

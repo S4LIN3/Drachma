@@ -11,7 +11,8 @@
     "start": "node server/index.js",
     "db:migrate": "node scripts/migrate.js",
     "db:transfer": "node scripts/migrate-turso-to-supabase.js",
-    "setup:supabase": "node scripts/migrate-and-connect-vercel.js"
+    "setup:supabase": "node scripts/migrate-and-connect-vercel.js",
+    "auth:reset-password": "node scripts/reset-password.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",

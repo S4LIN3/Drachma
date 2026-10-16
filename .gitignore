@@ -8,14 +8,19 @@ dist/
 dist-ssr/
 build/
 out/
+.output/
 
-# SQLite Database Files (server/better-sqlite3)
+# Vercel Deployment Cache
+.vercel/
+
+# SQLite Database Files
 *.db
 *.db-journal
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
+server/*.db
 
 # Environment Variables & Secrets
 .env
@@ -24,8 +29,9 @@ out/
 .env.development
 .env.test
 .env.production
+!.env.example
 
-# Logs & Coverage
+# Logs & Debugging
 logs/
 *.log
 npm-debug.log*
@@ -41,12 +47,11 @@ coverage/
 .vite/
 .eslintcache
 .stylelintcache
-.vercel/
 .turbo/
 .temp/
 *.tmp
 
-# System & Operating System Files
+# System & OS Files
 .DS_Store
 .DS_Store?
 ._*
@@ -62,6 +67,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
 # Scratch & Notes
-notes.txt
-Test.txt
+[Nn]otes.txt
+[Tt]est.txt
