@@ -247,6 +247,19 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
 
   // Budget Pacing Analysis
   const budgetStats = calculateBudgetStats(monthKey, monthlyOverallTotal, categoryBreakdown, budgets);
+
+  let paymentStatus = 'unpaid';
+  let paymentStatusLabel = 'Unpaid';
+  if (monthlyMealTotal === 0) {
+    paymentStatus = 'none';
+    paymentStatusLabel = 'None';
+  } else if (unpaidMealTotal === 0) {
+    paymentStatus = 'paid';
+    paymentStatusLabel = 'Paid';
+  } else if (paidMealTotal > 0) {
+    paymentStatus = 'partially_paid';
+    paymentStatusLabel = 'Partially Paid';
+  }
   
   return {
     monthKey,
@@ -254,6 +267,8 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
     monthlyMealTotal,
     paidMealTotal,
     unpaidMealTotal,
+    paymentStatus,
+    paymentStatusLabel,
     paidMealsCount,
     unpaidMealsCount,
     monthlyMiscTotal,

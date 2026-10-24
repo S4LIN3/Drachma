@@ -29,6 +29,24 @@ function formatReportDate(dateStr) {
   return `${d || ''} ${months[parseInt(m, 10) - 1] || ''} ${y || ''}`;
 }
 
+function getPaymentStatusLabel(status) {
+  switch (status) {
+    case 'paid': return 'Paid';
+    case 'partially_paid': return 'Partially Paid';
+    case 'unpaid': return 'Unpaid';
+    default: return '—';
+  }
+}
+
+function getPaymentStatusColors(status) {
+  switch (status) {
+    case 'paid': return 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300';
+    case 'partially_paid': return 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300';
+    case 'unpaid': return 'bg-red-100 dark:bg-red-950 text-red-800 dark:text-red-300';
+    default: return 'bg-neutral-100 dark:bg-neutral-800 text-neutral-500';
+  }
+}
+
 async function exportYearlyPDF(reportData, currency) {
   const { user, year, generatedAt, summary, monthlyBreakdown, categoryBreakdown } = reportData;
   const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
@@ -64,12 +82,16 @@ async function exportYearlyPDF(reportData, currency) {
   doc.setFont('DejaVuSans', 'bold'); doc.setFontSize(11); doc.setTextColor(31, 41, 51);
   doc.text('ANNUAL FINANCIAL SUMMARY', mx, y); y += 12;
 
+  const totalMealAmount = summary.totalMealAmount ?? summary.totalMealPayments ?? 0;
+  const totalPaidAmount = summary.totalPaidAmount ?? 0;
+  const totalUnpaidAmount = summary.totalUnpaidAmount ?? 0;
+
   const cards = [
     { label: 'TOTAL EXPENSES', value: formatCurrency(summary.totalExpenses, currency), sub: `${summary.expenseCount} transactions` },
-    { label: 'TOTAL MEAL PAYMENTS', value: formatCurrency(summary.totalMealPayments, currency), sub: `${summary.paymentCount} payments` },
+    { label: 'TOTAL MEAL AMOUNT', value: formatCurrency(totalMealAmount, currency), sub: `${summary.totalMealDays} days tracked` },
     { label: 'OVERALL TOTAL', value: formatCurrency(summary.totalOverall, currency), sub: 'Combined annual spend' },
-    { label: 'MEAL DAYS', value: String(summary.totalMealDays), sub: 'Days with meal tracking' },
-    { label: 'MEAL PORTIONS', value: String(summary.totalMealPortions), sub: 'Total portions marked' },
+    { label: 'PAID MEAL AMOUNT', value: formatCurrency(totalPaidAmount, currency), sub: `${summary.paymentCount} payment records` },
+    { label: 'UNPAID MEAL AMOUNT', value: formatCurrency(totalUnpaidAmount, currency), sub: 'Outstanding dues' },
     { label: 'AVG / MONTH', value: formatCurrency(summary.totalOverall / 12, currency), sub: 'Average monthly spend' },
   ];
 
@@ -94,38 +116,48 @@ async function exportYearlyPDF(reportData, currency) {
   });
   y += 2 * (cardH + cardGap) + 18;
 
-  // Monthly breakdown table
+  // Monthly breakdown table — now includes Meal Amt, Paid, Unpaid, Status
   doc.setFont('DejaVuSans', 'bold'); doc.setFontSize(11); doc.setTextColor(31, 41, 51);
-  doc.text('MONTHLY BREAKDOWN', mx, y); y += 8;
+  doc.text('MONTHLY MEAL PAYMENT BREAKDOWN', mx, y); y += 8;
 
   const monthRows = monthlyBreakdown.map((m) => [
     m.month,
-    String(m.expenseCount),
+    formatCurrency(m.mealAmount ?? m.mealTotal ?? 0, currency),
+    formatCurrency(m.paidAmount ?? 0, currency),
+    formatCurrency(m.unpaidAmount ?? 0, currency),
+    getPaymentStatusLabel(m.paymentStatus),
     formatCurrency(m.miscTotal, currency),
-    formatCurrency(m.mealTotal, currency),
-    formatCurrency(m.total, currency),
-    String(m.mealDays),
   ]);
 
   autoTable(doc, {
     startY: y,
-    head: [['Month', 'Expenses', 'Misc Total', 'Meal Total', 'Combined', 'Meal Days']],
+    head: [['Month', 'Meal Amount', 'Paid', 'Unpaid', 'Status', 'Misc']],
     body: monthRows,
+    foot: [[
+      'Year Total',
+      formatCurrency(totalMealAmount, currency),
+      formatCurrency(totalPaidAmount, currency),
+      formatCurrency(totalUnpaidAmount, currency),
+      '',
+      formatCurrency(summary.totalExpenses, currency),
+    ]],
     theme: 'plain',
     margin: { left: mx, right: mx, top: 48, bottom: 42 },
     tableWidth: cw,
     styles: { font: 'DejaVuSans', fontSize: 8.5, textColor: [31, 41, 51], cellPadding: { top: 4, bottom: 4, left: 6, right: 6 }, lineWidth: { bottom: 0.5 }, lineColor: [229, 231, 235], valign: 'middle' },
     headStyles: { font: 'DejaVuSans', fontStyle: 'bold', fontSize: 8.5, fillColor: [241, 245, 249], textColor: [31, 41, 51], lineWidth: { top: 0.5, bottom: 1 }, lineColor: [203, 213, 225] },
+    footStyles: { font: 'DejaVuSans', fontStyle: 'bold', fontSize: 8.5, fillColor: [241, 245, 249], textColor: [31, 41, 51], lineWidth: { top: 1, bottom: 1 }, lineColor: [203, 213, 225] },
     columnStyles: {
-      0: { cellWidth: 80 },
-      1: { cellWidth: 55, halign: 'right' },
-      2: { cellWidth: 80, halign: 'right' },
-      3: { cellWidth: 80, halign: 'right' },
-      4: { cellWidth: 80, halign: 'right', fontStyle: 'bold' },
-      5: { cellWidth: 55, halign: 'right' },
+      0: { cellWidth: 72 },
+      1: { cellWidth: 72, halign: 'right' },
+      2: { cellWidth: 68, halign: 'right' },
+      3: { cellWidth: 68, halign: 'right' },
+      4: { cellWidth: 70, halign: 'center' },
+      5: { cellWidth: 65, halign: 'right' },
     },
     alternateRowStyles: { fillColor: [248, 250, 252] },
     showHead: 'everyPage',
+    showFoot: 'lastPage',
     didDrawPage: (data) => {
       if (data.pageNumber > 1) {
         doc.setFont('DejaVuSans', 'bold'); doc.setFontSize(8.5); doc.setTextColor(102, 112, 133);
@@ -177,6 +209,10 @@ async function exportYearlyExcel(reportData, currency) {
   const { user, year, generatedAt, summary, monthlyBreakdown, categoryBreakdown } = reportData;
   const sym = currency === 'INR' ? '₹' : (CURRENCIES.find((c) => c.code === currency)?.symbol || currency);
 
+  const totalMealAmount = summary.totalMealAmount ?? summary.totalMealPayments ?? 0;
+  const totalPaidAmount = summary.totalPaidAmount ?? 0;
+  const totalUnpaidAmount = summary.totalUnpaidAmount ?? 0;
+
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Drachma Expense Tracker';
   workbook.created = new Date();
@@ -192,7 +228,9 @@ async function exportYearlyExcel(reportData, currency) {
   ws.addRow(['', '']);
   ws.addRow(['KEY METRICS', 'AMOUNT / VALUE']);
   ws.addRow(['Total Miscellaneous Expenses', `${sym} ${summary.totalExpenses}`]);
-  ws.addRow(['Total Meal Payments', `${sym} ${summary.totalMealPayments}`]);
+  ws.addRow(['Total Meal Amount', `${sym} ${totalMealAmount}`]);
+  ws.addRow(['Total Paid Meal Amount', `${sym} ${totalPaidAmount}`]);
+  ws.addRow(['Total Unpaid Meal Amount', `${sym} ${totalUnpaidAmount}`]);
   ws.addRow(['Overall Total', `${sym} ${summary.totalOverall}`]);
   ws.addRow(['Transaction Count', summary.expenseCount]);
   ws.addRow(['Payment Records', summary.paymentCount]);
@@ -201,18 +239,45 @@ async function exportYearlyExcel(reportData, currency) {
   ws.addRow(['Average Monthly Spend', `${sym} ${Math.round(summary.totalOverall / 12 * 100) / 100}`]);
   ws.addRow(['', '']);
 
-  // Sheet 2: Monthly
+  // Sheet 2: Monthly with payment columns
   const wsM = workbook.addWorksheet('Monthly Breakdown');
   wsM.columns = [
     { header: 'Month', key: 'month', width: 16 },
-    { header: 'Expenses', key: 'expenses', width: 12 },
+    { header: 'Meal Amount', key: 'mealAmount', width: 16 },
+    { header: 'Paid Amount', key: 'paidAmount', width: 16 },
+    { header: 'Unpaid Amount', key: 'unpaidAmount', width: 16 },
+    { header: 'Payment Status', key: 'paymentStatus', width: 18 },
     { header: 'Misc Total', key: 'miscTotal', width: 16 },
-    { header: 'Meal Total', key: 'mealTotal', width: 16 },
-    { header: 'Combined', key: 'total', width: 16 },
+    { header: 'Combined Total', key: 'total', width: 16 },
     { header: 'Meal Days', key: 'mealDays', width: 12 },
     { header: 'Meal Portions', key: 'mealPortions', width: 14 },
+    { header: 'Expense Count', key: 'expenseCount', width: 14 },
   ];
-  monthlyBreakdown.forEach((m) => wsM.addRow(m));
+  monthlyBreakdown.forEach((m) => wsM.addRow({
+    month: m.month,
+    mealAmount: m.mealAmount ?? m.mealTotal ?? 0,
+    paidAmount: m.paidAmount ?? 0,
+    unpaidAmount: m.unpaidAmount ?? 0,
+    paymentStatus: getPaymentStatusLabel(m.paymentStatus),
+    miscTotal: m.miscTotal,
+    total: m.total,
+    mealDays: m.mealDays,
+    mealPortions: m.mealPortions,
+    expenseCount: m.expenseCount,
+  }));
+
+  wsM.addRow({
+    month: 'Year Total',
+    mealAmount: totalMealAmount,
+    paidAmount: totalPaidAmount,
+    unpaidAmount: totalUnpaidAmount,
+    paymentStatus: '',
+    miscTotal: summary.totalExpenses,
+    total: summary.totalOverall,
+    mealDays: summary.totalMealDays,
+    mealPortions: summary.totalMealPortions,
+    expenseCount: summary.expenseCount,
+  });
 
   // Sheet 3: Categories
   if (categoryBreakdown.length > 0) {
@@ -280,12 +345,17 @@ export function YearlyReportModal({ isOpen, onClose, currency = 'INR' }) {
 
   if (!isOpen) return null;
 
+  const summary = reportData?.summary || {};
+  const totalMealAmount = summary.totalMealAmount ?? summary.totalMealPayments ?? 0;
+  const totalPaidAmount = summary.totalPaidAmount ?? 0;
+  const totalUnpaidAmount = summary.totalUnpaidAmount ?? 0;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-fade-in-scale">
       <div
         role="dialog"
         aria-modal="true"
-        className="bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col text-neutral-900 dark:text-neutral-100"
+        className="bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col text-neutral-900 dark:text-neutral-100"
       >
         {/* Header */}
         <div className="p-4 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-neutral-50/50 dark:bg-neutral-850/50">
@@ -360,46 +430,91 @@ export function YearlyReportModal({ isOpen, onClose, currency = 'INR' }) {
                     <h4 className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider mb-3">Annual Summary — {reportData.year}</h4>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                       {[
-                        { label: 'Total Expenses', value: formatCurrency(reportData.summary.totalExpenses, currency) },
-                        { label: 'Meal Payments', value: formatCurrency(reportData.summary.totalMealPayments, currency) },
-                        { label: 'Overall Total', value: formatCurrency(reportData.summary.totalOverall, currency), highlight: true },
-                        { label: 'Transactions', value: reportData.summary.expenseCount },
-                        { label: 'Meal Days', value: reportData.summary.totalMealDays },
-                        { label: 'Avg / Month', value: formatCurrency(reportData.summary.totalOverall / 12, currency) },
+                        { label: 'Total Expenses', value: formatCurrency(summary.totalExpenses, currency) },
+                        { label: 'Total Meal Amount', value: formatCurrency(totalMealAmount, currency) },
+                        { label: 'Overall Total', value: formatCurrency(summary.totalOverall, currency), highlight: true },
+                        { label: 'Paid Meal Amount', value: formatCurrency(totalPaidAmount, currency), positive: true },
+                        { label: 'Unpaid Meal Amount', value: formatCurrency(totalUnpaidAmount, currency), warning: totalUnpaidAmount > 0 },
+                        { label: 'Avg / Month', value: formatCurrency(summary.totalOverall / 12, currency) },
                       ].map((card) => (
-                        <div key={card.label} className={`p-3 rounded-xl border ${card.highlight ? 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/30' : 'border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-850'}`}>
+                        <div
+                          key={card.label}
+                          className={`p-3 rounded-xl border ${
+                            card.highlight
+                              ? 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/30'
+                              : card.positive
+                              ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30'
+                              : card.warning
+                              ? 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30'
+                              : 'border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-850'
+                          }`}
+                        >
                           <p className="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">{card.label}</p>
-                          <p className={`text-base font-bold mt-0.5 ${card.highlight ? 'text-blue-600 dark:text-blue-400' : 'text-neutral-900 dark:text-white'}`}>{card.value}</p>
+                          <p className={`text-base font-bold mt-0.5 ${
+                            card.highlight ? 'text-blue-600 dark:text-blue-400'
+                            : card.positive ? 'text-emerald-600 dark:text-emerald-400'
+                            : card.warning ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-neutral-900 dark:text-white'
+                          }`}>{card.value}</p>
                         </div>
                       ))}
                     </div>
                   </div>
 
-                  {/* Monthly table */}
+                  {/* Monthly table with payment columns */}
                   <div>
-                    <h4 className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider mb-3">Monthly Breakdown</h4>
+                    <h4 className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider mb-3">Monthly Meal Payment Breakdown</h4>
                     <div className="overflow-x-auto">
                       <table className="w-full text-[11px]">
                         <thead>
                           <tr className="bg-neutral-100 dark:bg-neutral-800">
                             <th className="text-left px-3 py-2 font-semibold">Month</th>
-                            <th className="text-right px-3 py-2 font-semibold">Transactions</th>
+                            <th className="text-right px-3 py-2 font-semibold">Meal Amount</th>
+                            <th className="text-right px-3 py-2 font-semibold">Paid</th>
+                            <th className="text-right px-3 py-2 font-semibold">Unpaid</th>
+                            <th className="text-center px-3 py-2 font-semibold">Status</th>
                             <th className="text-right px-3 py-2 font-semibold">Misc</th>
-                            <th className="text-right px-3 py-2 font-semibold">Meals</th>
-                            <th className="text-right px-3 py-2 font-semibold">Total</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {reportData.monthlyBreakdown.map((m, i) => (
-                            <tr key={m.monthKey} className={i % 2 === 0 ? 'bg-white dark:bg-neutral-900' : 'bg-neutral-50 dark:bg-neutral-850'}>
-                              <td className="px-3 py-2 font-medium">{m.month}</td>
-                              <td className="px-3 py-2 text-right text-neutral-500">{m.expenseCount}</td>
-                              <td className="px-3 py-2 text-right">{formatCurrency(m.miscTotal, currency)}</td>
-                              <td className="px-3 py-2 text-right">{formatCurrency(m.mealTotal, currency)}</td>
-                              <td className="px-3 py-2 text-right font-bold">{formatCurrency(m.total, currency)}</td>
-                            </tr>
-                          ))}
+                          {reportData.monthlyBreakdown.map((m, i) => {
+                            const mealAmt = m.mealAmount ?? m.mealTotal ?? 0;
+                            const paidAmt = m.paidAmount ?? 0;
+                            const unpaidAmt = m.unpaidAmount ?? 0;
+                            return (
+                              <tr key={m.monthKey} className={i % 2 === 0 ? 'bg-white dark:bg-neutral-900' : 'bg-neutral-50 dark:bg-neutral-850'}>
+                                <td className="px-3 py-2 font-medium">{m.month}</td>
+                                <td className="px-3 py-2 text-right">{formatCurrency(mealAmt, currency)}</td>
+                                <td className="px-3 py-2 text-right text-emerald-700 dark:text-emerald-400 font-semibold">{formatCurrency(paidAmt, currency)}</td>
+                                <td className={`px-3 py-2 text-right font-semibold ${unpaidAmt > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-neutral-400'}`}>
+                                  {formatCurrency(unpaidAmt, currency)}
+                                </td>
+                                <td className="px-3 py-2 text-center">
+                                  {m.paymentStatus && m.paymentStatus !== 'none' ? (
+                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${getPaymentStatusColors(m.paymentStatus)}`}>
+                                      {getPaymentStatusLabel(m.paymentStatus)}
+                                    </span>
+                                  ) : (
+                                    <span className="text-neutral-400">—</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-right text-neutral-500">{formatCurrency(m.miscTotal, currency)}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
+                        <tfoot>
+                          <tr className="bg-neutral-100 dark:bg-neutral-800 font-bold">
+                            <td className="px-3 py-2">Year Total</td>
+                            <td className="px-3 py-2 text-right">{formatCurrency(totalMealAmount, currency)}</td>
+                            <td className="px-3 py-2 text-right text-emerald-700 dark:text-emerald-400">{formatCurrency(totalPaidAmount, currency)}</td>
+                            <td className={`px-3 py-2 text-right ${totalUnpaidAmount > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-neutral-500'}`}>
+                              {formatCurrency(totalUnpaidAmount, currency)}
+                            </td>
+                            <td className="px-3 py-2" />
+                            <td className="px-3 py-2 text-right">{formatCurrency(summary.totalExpenses, currency)}</td>
+                          </tr>
+                        </tfoot>
                       </table>
                     </div>
                   </div>

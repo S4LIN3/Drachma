@@ -87,11 +87,18 @@ export const exportMonthToExcel = async ({
   wsSummary.addRow(['Generated On', formatReportDate(new Date().toISOString().slice(0, 10))]);
   wsSummary.addRow(['Currency', `${currency} (${currencySymbol})`]);
   wsSummary.addRow(['', '']);
+  const mealStatus = monthlyStats.paymentStatusLabel || (
+    monthlyStats.monthlyMealTotal === 0 ? 'None' :
+    monthlyStats.unpaidMealTotal === 0 ? 'Paid' :
+    monthlyStats.paidMealTotal > 0 ? 'Partially Paid' : 'Unpaid'
+  );
+
   wsSummary.addRow(['KEY FINANCIAL METRICS', 'AMOUNT / STAT']);
   wsSummary.addRow(['Total Monthly Expenses', `${currencySymbol} ${monthlyStats.monthlyOverallTotal}`]);
   wsSummary.addRow(['Recurring Meal Expenses', `${currencySymbol} ${monthlyStats.monthlyMealTotal}`]);
   wsSummary.addRow(['Paid Meal Expenses', `${currencySymbol} ${monthlyStats.paidMealTotal || 0}`]);
   wsSummary.addRow(['Unpaid Meal Expenses Due', `${currencySymbol} ${monthlyStats.unpaidMealTotal || 0}`]);
+  wsSummary.addRow(['Meal Payment Status', mealStatus]);
   wsSummary.addRow(['Miscellaneous Expenses', `${currencySymbol} ${monthlyStats.monthlyMiscTotal}`]);
   wsSummary.addRow(['Average Daily Expense', `${currencySymbol} ${monthlyStats.averageDailyExpense}`]);
   wsSummary.addRow(['Meal Tracking Days', `${monthlyStats.mealDaysCount} / ${daysInMonth} days`]);
@@ -285,6 +292,12 @@ export const exportMonthToPDF = ({
     ? Math.round((monthlyStats.mealDaysCount / daysInMonth) * 100) 
     : 0;
 
+  const mealStatus = monthlyStats.paymentStatusLabel || (
+    monthlyStats.monthlyMealTotal === 0 ? 'None' :
+    monthlyStats.unpaidMealTotal === 0 ? 'Paid' :
+    monthlyStats.paidMealTotal > 0 ? 'Partially Paid' : 'Unpaid'
+  );
+
   const summaryCards = [
     {
       label: 'TOTAL EXPENSES',
@@ -292,7 +305,7 @@ export const exportMonthToPDF = ({
       sub: `${daysInMonth} days in month`,
     },
     {
-      label: 'MEAL EXPENSES',
+      label: 'MEAL AMOUNT',
       value: formatPdfCurrency(monthlyStats.monthlyMealTotal, currency),
       sub: `${mealPercent}% of total spending`,
     },
@@ -300,6 +313,21 @@ export const exportMonthToPDF = ({
       label: 'MISC EXPENSES',
       value: formatPdfCurrency(monthlyStats.monthlyMiscTotal, currency),
       sub: `${miscPercent}% of total spending`,
+    },
+    {
+      label: 'PAID MEAL AMOUNT',
+      value: formatPdfCurrency(monthlyStats.paidMealTotal || 0, currency),
+      sub: `${monthlyStats.paidMealsCount || 0} portions settled`,
+    },
+    {
+      label: 'UNPAID MEAL AMOUNT',
+      value: formatPdfCurrency(monthlyStats.unpaidMealTotal || 0, currency),
+      sub: `${monthlyStats.unpaidMealsCount || 0} portions outstanding`,
+    },
+    {
+      label: 'MEAL PAYMENT STATUS',
+      value: mealStatus,
+      sub: monthlyStats.unpaidMealTotal === 0 && monthlyStats.monthlyMealTotal > 0 ? 'Fully settled' : monthlyStats.unpaidMealTotal > 0 ? 'Payment pending' : 'No marked meals',
     },
     {
       label: 'AVG / CALENDAR DAY',
@@ -322,6 +350,7 @@ export const exportMonthToPDF = ({
   const cardGap = 8;
   const cardWidth = (contentWidth - (cardGap * (cardCols - 1))) / cardCols;
   const cardHeight = 44;
+  const totalRows = Math.ceil(summaryCards.length / cardCols);
 
   summaryCards.forEach((card, idx) => {
     const row = Math.floor(idx / cardCols);
@@ -355,7 +384,7 @@ export const exportMonthToPDF = ({
     doc.text(card.sub, x + 8, y + 38);
   });
 
-  currentY += (2 * (cardHeight + cardGap)) + 16;
+  currentY += (totalRows * (cardHeight + cardGap)) + 16;
 
   // ----------------------------------------------------
   // 3. Section: Daily Expense & Meal Log Table

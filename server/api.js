@@ -640,40 +640,100 @@ export async function handleApiRequest(req, res, next) {
 
       const yearlyData = await getYearlyData(userId, year);
 
-      // Build monthly breakdown
+      // Build monthly breakdown — each month's meal amounts computed from meal_tracker
+      // using the actual meal date, not the payment date. This correctly isolates
+      // each month's mealAmount, paidAmount, and unpaidAmount independently.
       const months = [
         'January','February','March','April','May','June',
         'July','August','September','October','November','December',
       ];
 
+      // Map recurring items by id for historical price lookup
+      const itemMap = new Map(yearlyData.recurringItems.map((r) => [r.id, r]));
+
+      function getItemPriceForDate(item, dateStr) {
+        if (!item) return 0;
+        if (Array.isArray(item.priceHistory) && item.priceHistory.length > 0) {
+          const sorted = [...item.priceHistory].sort((a, b) =>
+            b.effectiveFrom.localeCompare(a.effectiveFrom)
+          );
+          const applicable = sorted.find((p) => p.effectiveFrom <= dateStr);
+          if (applicable && typeof applicable.price === 'number') return applicable.price;
+        }
+        return Number(item.pricePerOccurrence) || 0;
+      }
+
       const monthlyBreakdown = months.map((monthName, idx) => {
         const monthKey = `${year}-${String(idx + 1).padStart(2, '0')}`;
         const monthExpenses = yearlyData.expenses.filter((e) => e.month === monthKey || e.date.startsWith(monthKey));
         const monthMeals = yearlyData.mealTracker.filter((m) => m.month === monthKey || m.date.startsWith(monthKey));
-        const monthPayments = yearlyData.payments.filter((p) => p.paymentDate.startsWith(monthKey));
 
         const miscTotal = monthExpenses.reduce((sum, e) => sum + e.totalAmount, 0);
-        const mealTotal = monthPayments.reduce((sum, p) => sum + p.totalAmount, 0);
-        const mealDays = monthMeals.filter((m) => Object.values(m.mealsMarked).some(Boolean)).length;
-        const mealPortions = monthMeals.reduce((sum, m) => sum + Object.values(m.mealsMarked).filter(Boolean).length, 0);
+
+        // Compute meal amount, paid amount, and unpaid amount from per-day meal records
+        let mealAmount = 0;
+        let paidAmount = 0;
+        let unpaidAmount = 0;
+        let mealDays = 0;
+        let mealPortions = 0;
+
+        for (const mealDay of monthMeals) {
+          let dayHasMeal = false;
+          if (mealDay.mealsMarked) {
+            for (const [itemId, isMarked] of Object.entries(mealDay.mealsMarked)) {
+              if (isMarked) {
+                const item = itemMap.get(itemId);
+                const price = item ? getItemPriceForDate(item, mealDay.date) : 0;
+                const isPaid = !!(mealDay.mealsPaid?.[itemId]?.paid || mealDay.mealsPaid?.[itemId] === true);
+                mealAmount += price;
+                if (isPaid) {
+                  paidAmount += price;
+                } else {
+                  unpaidAmount += price;
+                }
+                mealPortions += 1;
+                dayHasMeal = true;
+              }
+            }
+          }
+          if (dayHasMeal) mealDays += 1;
+        }
+
+        // Derive payment status from amounts
+        let paymentStatus = 'unpaid';
+        if (mealAmount === 0) {
+          paymentStatus = 'none';
+        } else if (unpaidAmount === 0) {
+          paymentStatus = 'paid';
+        } else if (paidAmount > 0) {
+          paymentStatus = 'partially_paid';
+        }
 
         return {
           month: monthName,
           monthKey,
           expenseCount: monthExpenses.length,
           miscTotal: Math.round(miscTotal * 100) / 100,
-          mealTotal: Math.round(mealTotal * 100) / 100,
-          total: Math.round((miscTotal + mealTotal) * 100) / 100,
+          mealAmount: Math.round(mealAmount * 100) / 100,
+          paidAmount: Math.round(paidAmount * 100) / 100,
+          unpaidAmount: Math.round(unpaidAmount * 100) / 100,
+          paymentStatus,
+          // Legacy field kept for backward compat
+          mealTotal: Math.round(paidAmount * 100) / 100,
+          total: Math.round((miscTotal + mealAmount) * 100) / 100,
           mealDays,
           mealPortions,
         };
       });
 
       const totalExpenses = yearlyData.expenses.reduce((sum, e) => sum + e.totalAmount, 0);
+      const totalMealAmount = monthlyBreakdown.reduce((sum, m) => sum + m.mealAmount, 0);
+      const totalPaidAmount = monthlyBreakdown.reduce((sum, m) => sum + m.paidAmount, 0);
+      const totalUnpaidAmount = monthlyBreakdown.reduce((sum, m) => sum + m.unpaidAmount, 0);
       const totalMealPayments = yearlyData.payments.reduce((sum, p) => sum + p.totalAmount, 0);
-      const totalOverall = totalExpenses + totalMealPayments;
-      const totalMealDays = yearlyData.mealTracker.filter((m) => Object.values(m.mealsMarked).some(Boolean)).length;
-      const totalMealPortions = yearlyData.mealTracker.reduce((sum, m) => sum + Object.values(m.mealsMarked).filter(Boolean).length, 0);
+      const totalOverall = totalExpenses + totalMealAmount;
+      const totalMealDays = monthlyBreakdown.reduce((sum, m) => sum + m.mealDays, 0);
+      const totalMealPortions = monthlyBreakdown.reduce((sum, m) => sum + m.mealPortions, 0);
 
       // Category breakdown
       const categoryTotals = {};
@@ -701,6 +761,9 @@ export async function handleApiRequest(req, res, next) {
           hasData,
           summary: {
             totalExpenses: Math.round(totalExpenses * 100) / 100,
+            totalMealAmount: Math.round(totalMealAmount * 100) / 100,
+            totalPaidAmount: Math.round(totalPaidAmount * 100) / 100,
+            totalUnpaidAmount: Math.round(totalUnpaidAmount * 100) / 100,
             totalMealPayments: Math.round(totalMealPayments * 100) / 100,
             totalOverall: Math.round(totalOverall * 100) / 100,
             totalMealDays,
