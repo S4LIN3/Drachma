@@ -11,6 +11,68 @@ loadEnv();
 
 const { Pool } = pg;
 
+// Force node-postgres to return DATE (OID 1082) as raw 'YYYY-MM-DD' strings instead of JS Date objects
+if (pg && pg.types && typeof pg.types.setTypeParser === 'function') {
+  pg.types.setTypeParser(1082, (val) => val);
+}
+
+/**
+ * Normalizes any Date instance, ISO timestamp, or date string into standard 'YYYY-MM-DD'.
+ */
+export function formatDateStr(val) {
+  if (!val) return '';
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(val).trim();
+  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return s;
+}
+
+/**
+ * Normalizes any month representation into standard 'YYYY-MM'.
+ */
+export function formatMonthStr(monthVal, dateVal) {
+  if (monthVal) {
+    const s = String(monthVal).trim();
+    const match = s.match(/^(\d{4}-\d{2})/);
+    if (match) return match[1];
+  }
+  const d = formatDateStr(dateVal);
+  if (d && d.length >= 7) {
+    return d.slice(0, 7);
+  }
+  return String(monthVal || '');
+}
+
+/**
+ * Safely parses JSON string or handles already-parsed objects without crashing.
+ */
+export function safeJsonParse(val, fallback) {
+  if (val === null || val === undefined) return fallback;
+  if (typeof val === 'object') return val;
+  try {
+    const parsed = JSON.parse(val);
+    if (typeof parsed === 'string') {
+      try { return JSON.parse(parsed); } catch { return parsed; }
+    }
+    return parsed ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
 // ─── Database Configuration ──────────────────────────────────────────────────
 const pgConnectionString =
   process.env.DATABASE_URL ||
@@ -344,61 +406,102 @@ export async function getAllData(userId) {
 
   if (!userId) throw new Error('userId required for getAllData');
 
+  // Automatically claim any unassigned or legacy records for this user so data is never hidden
+  const tables = ['recurring_items', 'meal_tracker', 'expenses', 'budgets', 'payments', 'settings'];
+  for (const tbl of tables) {
+    try {
+      await db.execute({
+        sql: `UPDATE ${tbl} SET user_id = ? WHERE user_id = ? OR user_id IS NULL OR user_id = ''`,
+        args: [userId, DEFAULT_USER_ID],
+      });
+    } catch (_) {}
+  }
+
   const [recRes, mealRes, expRes, budgetRes, setRes, payRes] = await Promise.all([
-    db.execute({ sql: 'SELECT * FROM recurring_items WHERE user_id = ?', args: [userId] }),
-    db.execute({ sql: 'SELECT * FROM meal_tracker WHERE user_id = ? ORDER BY date ASC', args: [userId] }),
-    db.execute({ sql: 'SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC', args: [userId] }),
-    db.execute({ sql: 'SELECT * FROM budgets WHERE user_id = ?', args: [userId] }),
-    db.execute({ sql: 'SELECT * FROM settings WHERE user_id = ?', args: [userId] }),
-    db.execute({ sql: 'SELECT * FROM payments WHERE user_id = ? ORDER BY payment_date DESC, created_at DESC', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM recurring_items WHERE user_id = ? OR user_id IS NULL OR user_id = ?', args: [userId, DEFAULT_USER_ID] }),
+    db.execute({ sql: 'SELECT * FROM meal_tracker WHERE user_id = ? OR user_id IS NULL OR user_id = ? ORDER BY date ASC', args: [userId, DEFAULT_USER_ID] }),
+    db.execute({ sql: 'SELECT * FROM expenses WHERE user_id = ? OR user_id IS NULL OR user_id = ? ORDER BY date DESC', args: [userId, DEFAULT_USER_ID] }),
+    db.execute({ sql: 'SELECT * FROM budgets WHERE user_id = ? OR user_id IS NULL OR user_id = ?', args: [userId, DEFAULT_USER_ID] }),
+    db.execute({ sql: 'SELECT * FROM settings WHERE user_id = ? OR user_id IS NULL OR user_id = ?', args: [userId, DEFAULT_USER_ID] }),
+    db.execute({ sql: 'SELECT * FROM payments WHERE user_id = ? OR user_id IS NULL OR user_id = ? ORDER BY payment_date DESC, created_at DESC', args: [userId, DEFAULT_USER_ID] }),
   ]);
 
-  const recurringItems = recRes.rows.map((r) => ({
+  let recurringRows = recRes.rows;
+  if (recurringRows.length === 0) {
+    const todayStr = formatDateStr(new Date());
+    const now = new Date().toISOString();
+    const defaultTemplates = [
+      { id: `rec-lunch-${userId}`, name: 'Lunch', price_per_occurrence: 100, frequency: 'daily', start_date: todayStr, end_date: null, is_active: 1, icon: '🍽️', description: 'Standard Daily Lunch', price_history: JSON.stringify([{ effectiveFrom: todayStr, price: 100 }]), created_at: now, updated_at: now, user_id: userId },
+      { id: `rec-dinner-${userId}`, name: 'Dinner', price_per_occurrence: 80, frequency: 'daily', start_date: todayStr, end_date: null, is_active: 1, icon: '🍛', description: 'Standard Daily Dinner', price_history: JSON.stringify([{ effectiveFrom: todayStr, price: 80 }]), created_at: now, updated_at: now, user_id: userId },
+      { id: `rec-tea-${userId}`, name: 'Tea & Snacks', price_per_occurrence: 25, frequency: 'daily', start_date: todayStr, end_date: null, is_active: 1, icon: '☕', description: 'Evening Tea and Light Snacks', price_history: JSON.stringify([{ effectiveFrom: todayStr, price: 25 }]), created_at: now, updated_at: now, user_id: userId },
+    ];
+    try {
+      await db.batch(
+        defaultTemplates.map((item) => ({
+          sql: `INSERT INTO recurring_items (id, name, price_per_occurrence, frequency, start_date, end_date, is_active, icon, description, price_history, created_at, updated_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [item.id, item.name, item.price_per_occurrence, item.frequency, item.start_date, item.end_date, item.is_active, item.icon, item.description, item.price_history, item.created_at, item.updated_at, userId],
+        })),
+        'write'
+      );
+      recurringRows = defaultTemplates;
+    } catch (_) {}
+  }
+
+  const recurringItems = recurringRows.map((r) => ({
     id: String(r.id),
     name: String(r.name),
-    pricePerOccurrence: Number(r.price_per_occurrence),
+    pricePerOccurrence: Number(r.price_per_occurrence) || 0,
     frequency: String(r.frequency || 'daily'),
-    startDate: r.start_date ? String(r.start_date) : null,
-    endDate: r.end_date ? String(r.end_date) : null,
+    startDate: r.start_date ? formatDateStr(r.start_date) : null,
+    endDate: r.end_date ? formatDateStr(r.end_date) : null,
     isActive: Number(r.is_active) === 1 || r.is_active === true,
     icon: String(r.icon || '🍽️'),
     description: String(r.description || ''),
-    priceHistory: typeof r.price_history === 'string' ? (r.price_history ? JSON.parse(String(r.price_history)) : []) : (r.price_history || []),
+    priceHistory: safeJsonParse(r.price_history, []),
     createdAt: r.created_at ? String(r.created_at) : null,
     updatedAt: r.updated_at ? String(r.updated_at) : null,
   }));
 
-  const mealTracker = mealRes.rows.map((m) => ({
-    id: String(m.id),
-    date: String(m.date),
-    month: String(m.month),
-    mealsMarked: typeof m.meals_marked === 'string' ? (m.meals_marked ? JSON.parse(String(m.meals_marked)) : {}) : (m.meals_marked || {}),
-    mealsPaid: typeof m.meals_paid === 'string' ? (m.meals_paid ? JSON.parse(String(m.meals_paid)) : {}) : (m.meals_paid || {}),
-    notes: m.notes ? String(m.notes) : '',
-    createdAt: m.created_at ? String(m.created_at) : null,
-    updatedAt: m.updated_at ? String(m.updated_at) : null,
-  }));
+  const mealTracker = mealRes.rows.map((m) => {
+    const dateStr = formatDateStr(m.date);
+    const monthStr = formatMonthStr(m.month, dateStr);
+    return {
+      id: String(m.id),
+      date: dateStr,
+      month: monthStr,
+      mealsMarked: safeJsonParse(m.meals_marked, {}),
+      mealsPaid: safeJsonParse(m.meals_paid, {}),
+      notes: m.notes ? String(m.notes) : '',
+      createdAt: m.created_at ? String(m.created_at) : null,
+      updatedAt: m.updated_at ? String(m.updated_at) : null,
+    };
+  });
 
-  const expenses = expRes.rows.map((e) => ({
-    id: String(e.id),
-    date: String(e.date),
-    month: String(e.month),
-    description: String(e.description),
-    category: String(e.category),
-    unitPrice: Number(e.unit_price),
-    quantity: Number(e.quantity),
-    totalAmount: Number(e.total_amount),
-    notes: e.notes ? String(e.notes) : '',
-    attachment: e.attachment ? String(e.attachment) : '',
-    createdAt: e.created_at ? String(e.created_at) : null,
-    updatedAt: e.updated_at ? String(e.updated_at) : null,
-  }));
+  const expenses = expRes.rows.map((e) => {
+    const dateStr = formatDateStr(e.date);
+    const monthStr = formatMonthStr(e.month, dateStr);
+    return {
+      id: String(e.id),
+      date: dateStr,
+      month: monthStr,
+      description: String(e.description || ''),
+      category: String(e.category || 'other'),
+      unitPrice: Number(e.unit_price) || 0,
+      quantity: Number(e.quantity) || 1,
+      totalAmount: Number(e.total_amount) || 0,
+      notes: e.notes ? String(e.notes) : '',
+      attachment: e.attachment ? String(e.attachment) : '',
+      createdAt: e.created_at ? String(e.created_at) : null,
+      updatedAt: e.updated_at ? String(e.updated_at) : null,
+    };
+  });
 
   const budgets = budgetRes.rows.map((b) => ({
     id: String(b.id),
-    month: String(b.month),
+    month: formatMonthStr(b.month),
     category: String(b.category),
-    amount: Number(b.amount),
+    amount: Number(b.amount) || 0,
     createdAt: b.created_at ? String(b.created_at) : null,
     updatedAt: b.updated_at ? String(b.updated_at) : null,
   }));
@@ -412,11 +515,11 @@ export async function getAllData(userId) {
   const payments = payRes.rows.map((p) => ({
     id: String(p.id),
     recurringItemId: String(p.recurring_item_id),
-    startDate: String(p.start_date),
-    paidTillDate: String(p.paid_till_date),
-    mealCount: Number(p.meal_count),
-    totalAmount: Number(p.total_amount),
-    paymentDate: String(p.payment_date),
+    startDate: formatDateStr(p.start_date),
+    paidTillDate: formatDateStr(p.paid_till_date),
+    mealCount: Number(p.meal_count) || 0,
+    totalAmount: Number(p.total_amount) || 0,
+    paymentDate: formatDateStr(p.payment_date),
     notes: p.notes ? String(p.notes) : '',
     createdAt: p.created_at ? String(p.created_at) : null,
     updatedAt: p.updated_at ? String(p.updated_at) : null,
@@ -440,72 +543,78 @@ export async function getYearlyData(userId, year) {
   const [expRes, mealRes, payRes, recRes] = await Promise.all([
     db.execute({
       sql: `SELECT * FROM expenses
-            WHERE user_id = ?
+            WHERE (user_id = ? OR user_id IS NULL OR user_id = ?)
               AND date >= ?
               AND date < ?
             ORDER BY date ASC`,
-      args: [userId, startDate, startOfNextYear],
+      args: [userId, DEFAULT_USER_ID, startDate, startOfNextYear],
     }),
     db.execute({
       sql: `SELECT * FROM meal_tracker
-            WHERE user_id = ?
+            WHERE (user_id = ? OR user_id IS NULL OR user_id = ?)
               AND date >= ?
               AND date < ?
             ORDER BY date ASC`,
-      args: [userId, startDate, startOfNextYear],
+      args: [userId, DEFAULT_USER_ID, startDate, startOfNextYear],
     }),
     db.execute({
       sql: `SELECT * FROM payments
-            WHERE user_id = ?
+            WHERE (user_id = ? OR user_id IS NULL OR user_id = ?)
               AND payment_date >= ?
               AND payment_date < ?
             ORDER BY payment_date ASC`,
-      args: [userId, startDate, startOfNextYear],
+      args: [userId, DEFAULT_USER_ID, startDate, startOfNextYear],
     }),
     db.execute({
-      sql: 'SELECT * FROM recurring_items WHERE user_id = ?',
-      args: [userId],
+      sql: 'SELECT * FROM recurring_items WHERE user_id = ? OR user_id IS NULL OR user_id = ?',
+      args: [userId, DEFAULT_USER_ID],
     }),
   ]);
 
   return {
-    expenses: expRes.rows.map((e) => ({
-      id: String(e.id),
-      date: String(e.date),
-      month: String(e.month),
-      description: String(e.description),
-      category: String(e.category),
-      unitPrice: Number(e.unit_price),
-      quantity: Number(e.quantity),
-      totalAmount: Number(e.total_amount),
-      notes: e.notes ? String(e.notes) : '',
-      createdAt: e.created_at ? String(e.created_at) : null,
-    })),
-    mealTracker: mealRes.rows.map((m) => ({
-      id: String(m.id),
-      date: String(m.date),
-      month: String(m.month),
-      mealsMarked: typeof m.meals_marked === 'string' ? (m.meals_marked ? JSON.parse(String(m.meals_marked)) : {}) : (m.meals_marked || {}),
-      mealsPaid: typeof m.meals_paid === 'string' ? (m.meals_paid ? JSON.parse(String(m.meals_paid)) : {}) : (m.meals_paid || {}),
-      notes: m.notes ? String(m.notes) : '',
-    })),
+    expenses: expRes.rows.map((e) => {
+      const dateStr = formatDateStr(e.date);
+      return {
+        id: String(e.id),
+        date: dateStr,
+        month: formatMonthStr(e.month, dateStr),
+        description: String(e.description || ''),
+        category: String(e.category || 'other'),
+        unitPrice: Number(e.unit_price) || 0,
+        quantity: Number(e.quantity) || 1,
+        totalAmount: Number(e.total_amount) || 0,
+        notes: e.notes ? String(e.notes) : '',
+        createdAt: e.created_at ? String(e.created_at) : null,
+      };
+    }),
+    mealTracker: mealRes.rows.map((m) => {
+      const dateStr = formatDateStr(m.date);
+      return {
+        id: String(m.id),
+        date: dateStr,
+        month: formatMonthStr(m.month, dateStr),
+        mealsMarked: safeJsonParse(m.meals_marked, {}),
+        mealsPaid: safeJsonParse(m.meals_paid, {}),
+        notes: m.notes ? String(m.notes) : '',
+      };
+    }),
     payments: payRes.rows.map((p) => ({
       id: String(p.id),
       recurringItemId: String(p.recurring_item_id),
-      startDate: String(p.start_date),
-      paidTillDate: String(p.paid_till_date),
-      mealCount: Number(p.meal_count),
-      totalAmount: Number(p.total_amount),
-      paymentDate: String(p.payment_date),
+      startDate: formatDateStr(p.start_date),
+      paidTillDate: formatDateStr(p.paid_till_date),
+      mealCount: Number(p.meal_count) || 0,
+      totalAmount: Number(p.total_amount) || 0,
+      paymentDate: formatDateStr(p.payment_date),
       notes: p.notes ? String(p.notes) : '',
     })),
     recurringItems: recRes.rows.map((r) => ({
       id: String(r.id),
       name: String(r.name),
-      pricePerOccurrence: Number(r.price_per_occurrence),
+      pricePerOccurrence: Number(r.price_per_occurrence) || 0,
       frequency: String(r.frequency || 'daily'),
       icon: String(r.icon || '🍽️'),
-      priceHistory: typeof r.price_history === 'string' ? (r.price_history ? JSON.parse(String(r.price_history)) : []) : (r.price_history || []),
+      priceHistory: safeJsonParse(r.price_history, []),
     })),
     year: Number(year),
   };

@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { formatCurrency } from '../constants/currencies';
 import { EXPENSE_CATEGORIES, getCategoryMeta } from '../constants/categories';
-import { formatDateDisplay } from '../utils/dateHelpers';
+import { formatDateDisplay, normalizeDateStr } from '../utils/dateHelpers';
 import { 
   Search, 
   Plus, 
@@ -40,7 +40,8 @@ export const ExpenseListView = ({
   const filtered = useMemo(() => {
     return expenses
       .filter((exp) => {
-        const matchesMonth = exp.month === selectedMonth || (exp.date && exp.date.startsWith(monthPrefix));
+        const cleanDate = normalizeDateStr(exp.date);
+        const matchesMonth = exp.month === selectedMonth || (cleanDate && cleanDate.startsWith(monthPrefix));
         if (!matchesMonth) return false;
 
         const matchesSearch = exp.description.toLowerCase().includes(searchTerm.toLowerCase()) ||

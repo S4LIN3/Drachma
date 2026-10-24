@@ -1,4 +1,4 @@
-import { db, initDatabase, getAllData, getYearlyData, runDatabaseMaintenance } from './db.js';
+import { db, initDatabase, getAllData, getYearlyData, runDatabaseMaintenance, formatDateStr, formatMonthStr, safeJsonParse, DEFAULT_USER_ID } from './db.js';
 import { hashPassword, verifyPassword, signToken, extractUserFromRequest } from './auth.js';
 
 // ─── SSE clients (keyed by userId for per-user broadcasts) ──────────────────
@@ -421,6 +421,17 @@ export async function handleApiRequest(req, res, next) {
       const name = String(userRow.name);
       const token = signToken({ userId, email, name });
 
+      // Reassign any unassigned or legacy migrated records to this user
+      const claimTables = ['recurring_items', 'meal_tracker', 'expenses', 'budgets', 'payments', 'settings'];
+      for (const tbl of claimTables) {
+        try {
+          await db.execute({
+            sql: `UPDATE ${tbl} SET user_id = ? WHERE user_id = ? OR user_id IS NULL OR user_id = ''`,
+            args: [userId, DEFAULT_USER_ID],
+          });
+        } catch (_) {}
+      }
+
       console.log(`[Auth] User logged in: ${email}`);
       return sendJson(res, 200, {
         success: true,
@@ -712,26 +723,30 @@ export async function handleApiRequest(req, res, next) {
   if (path === '/meals/toggle' && method === 'POST') {
     try {
       const body = await parseJsonBody(req);
-      const date = sanitizeInput(body.date, 10);
+      const rawDate = sanitizeInput(body.date, 10);
       const recurringItemId = sanitizeInput(body.recurringItemId, 100);
+      const date = formatDateStr(rawDate);
 
       if (!isValidDate(date) || !isValidId(recurringItemId)) {
         return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) and recurringItemId required' });
       }
 
-      // Verify recurring item belongs to this user
+      // Verify recurring item belongs to this user (or claim if unassigned)
       const recCheck = await db.execute({
-        sql: 'SELECT id FROM recurring_items WHERE id = ? AND user_id = ?',
-        args: [recurringItemId, userId],
+        sql: 'SELECT id, user_id FROM recurring_items WHERE id = ? AND (user_id = ? OR user_id IS NULL OR user_id = ?)',
+        args: [recurringItemId, userId, DEFAULT_USER_ID],
       });
       if (recCheck.rows.length === 0) {
         return sendJson(res, 404, { success: false, error: 'Recurring item not found' });
       }
+      if (!recCheck.rows[0].user_id || recCheck.rows[0].user_id === DEFAULT_USER_ID) {
+        await db.execute({ sql: 'UPDATE recurring_items SET user_id = ? WHERE id = ?', args: [userId, recurringItemId] });
+      }
 
       const month = date.slice(0, 7);
       const existingRes = await db.execute({
-        sql: 'SELECT * FROM meal_tracker WHERE date = ? AND user_id = ?',
-        args: [date, userId],
+        sql: 'SELECT * FROM meal_tracker WHERE date = ? AND (user_id = ? OR user_id IS NULL OR user_id = ?)',
+        args: [date, userId, DEFAULT_USER_ID],
       });
       const existing = existingRes.rows[0];
 
@@ -739,17 +754,17 @@ export async function handleApiRequest(req, res, next) {
       const now = new Date().toISOString();
 
       if (existing) {
-        const currentMarks = existing.meals_marked ? JSON.parse(String(existing.meals_marked)) : {};
+        const currentMarks = safeJsonParse(existing.meals_marked, {});
         const currentVal = !!currentMarks[recurringItemId];
         updatedMarks = { ...currentMarks, [recurringItemId]: !currentVal };
 
         const hasAnyMarked = Object.values(updatedMarks).some(Boolean);
         if (!hasAnyMarked && !existing.notes) {
-          await db.execute({ sql: 'DELETE FROM meal_tracker WHERE date = ? AND user_id = ?', args: [date, userId] });
+          await db.execute({ sql: 'DELETE FROM meal_tracker WHERE id = ?', args: [existing.id] });
         } else {
           await db.execute({
-            sql: 'UPDATE meal_tracker SET meals_marked = ?, updated_at = ? WHERE date = ? AND user_id = ?',
-            args: [JSON.stringify(updatedMarks), now, date, userId],
+            sql: 'UPDATE meal_tracker SET meals_marked = ?, updated_at = ?, user_id = ? WHERE id = ?',
+            args: [JSON.stringify(updatedMarks), now, userId, existing.id],
           });
         }
       } else {
@@ -776,23 +791,24 @@ export async function handleApiRequest(req, res, next) {
   if (path === '/meals/notes' && method === 'POST') {
     try {
       const body = await parseJsonBody(req);
-      const date = sanitizeInput(body.date, 10);
+      const rawDate = sanitizeInput(body.date, 10);
       const notes = sanitizeInput(body.notes, 2000);
+      const date = formatDateStr(rawDate);
 
       if (!isValidDate(date)) return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) required' });
 
       const month = date.slice(0, 7);
       const existingRes = await db.execute({
-        sql: 'SELECT * FROM meal_tracker WHERE date = ? AND user_id = ?',
-        args: [date, userId],
+        sql: 'SELECT * FROM meal_tracker WHERE date = ? AND (user_id = ? OR user_id IS NULL OR user_id = ?)',
+        args: [date, userId, DEFAULT_USER_ID],
       });
       const existing = existingRes.rows[0];
       const now = new Date().toISOString();
 
       if (existing) {
         await db.execute({
-          sql: 'UPDATE meal_tracker SET notes = ?, updated_at = ? WHERE date = ? AND user_id = ?',
-          args: [notes, now, date, userId],
+          sql: 'UPDATE meal_tracker SET notes = ?, updated_at = ?, user_id = ? WHERE id = ?',
+          args: [notes, now, userId, existing.id],
         });
       } else if (notes) {
         const id = `meal-track-${date}-${Date.now()}`;
@@ -1143,10 +1159,10 @@ export async function handleApiRequest(req, res, next) {
 
       const eligibleEntries = [];
       for (const row of mealRes.rows) {
-        const date = String(row.date);
+        const date = formatDateStr(row.date);
         if (date > paidTillDate) continue;
-        const mealsMarked = row.meals_marked ? JSON.parse(String(row.meals_marked)) : {};
-        const mealsPaid = row.meals_paid ? JSON.parse(String(row.meals_paid)) : {};
+        const mealsMarked = safeJsonParse(row.meals_marked, {});
+        const mealsPaid = safeJsonParse(row.meals_paid, {});
         const isMarked = !!mealsMarked[recurringItemId];
         const isPaid = !!(mealsPaid[recurringItemId]?.paid || mealsPaid[recurringItemId] === true);
         if (isMarked && !isPaid) {

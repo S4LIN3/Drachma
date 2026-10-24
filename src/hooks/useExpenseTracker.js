@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { loadStoredData, saveStoredData, clearAllData, exportDataAsJSON } from '../utils/storage';
-import { getCurrentMonthKey, getAdjacentMonthKey, getTodayDateStr } from '../utils/dateHelpers';
+import { getCurrentMonthKey, getAdjacentMonthKey, getTodayDateStr, normalizeDateStr } from '../utils/dateHelpers';
 import { calculateMonthlyTotals, calculateDailyTotals } from '../utils/calculations';
 import { 
   fetchDbData, 
@@ -42,8 +42,20 @@ export const useExpenseTracker = (addToast) => {
       const dbData = await fetchDbData();
       if (dbData) {
         if (Array.isArray(dbData.recurringItems)) setRecurringItems(dbData.recurringItems);
-        if (Array.isArray(dbData.mealTracker)) setMealTracker(dbData.mealTracker);
-        if (Array.isArray(dbData.expenses)) setExpenses(dbData.expenses);
+        if (Array.isArray(dbData.mealTracker)) {
+          setMealTracker(dbData.mealTracker.map(m => ({
+            ...m,
+            date: normalizeDateStr(m.date),
+            month: (m.month && String(m.month).slice(0, 7)) || normalizeDateStr(m.date).slice(0, 7),
+          })));
+        }
+        if (Array.isArray(dbData.expenses)) {
+          setExpenses(dbData.expenses.map(e => ({
+            ...e,
+            date: normalizeDateStr(e.date),
+            month: (e.month && String(e.month).slice(0, 7)) || normalizeDateStr(e.date).slice(0, 7),
+          })));
+        }
         if (Array.isArray(dbData.budgets)) setBudgets(dbData.budgets);
         if (Array.isArray(dbData.payments)) setPayments(dbData.payments);
         if (dbData.settings && Object.keys(dbData.settings).length > 0) {
@@ -150,13 +162,14 @@ export const useExpenseTracker = (addToast) => {
     setSelectedDate(getTodayDateStr());
   }, []);
 
-  // Meal Tracking (Calendar marking) -> Persisted to SQLite DB
+  // Meal Tracking (Calendar marking) -> Persisted to DB
   const toggleMealMark = useCallback((dateStr, recurringItemId) => {
-    const monthKey = dateStr.slice(0, 7);
+    const cleanDate = normalizeDateStr(dateStr);
+    const monthKey = cleanDate.slice(0, 7);
     
     // 1. Optimistic UI update
     setMealTracker(prev => {
-      const existingIndex = prev.findIndex(entry => entry.date === dateStr);
+      const existingIndex = prev.findIndex(entry => normalizeDateStr(entry.date) === cleanDate);
       
       if (existingIndex >= 0) {
         const existing = prev[existingIndex];
@@ -174,14 +187,16 @@ export const useExpenseTracker = (addToast) => {
         const updatedList = [...prev];
         updatedList[existingIndex] = {
           ...existing,
+          date: cleanDate,
+          month: monthKey,
           mealsMarked: updatedMeals,
           updatedAt: new Date().toISOString(),
         };
         return updatedList;
       } else {
         const newRecord = {
-          id: `meal-track-${dateStr}-${Date.now()}`,
-          date: dateStr,
+          id: `meal-track-${cleanDate}-${Date.now()}`,
+          date: cleanDate,
           month: monthKey,
           mealsMarked: { [recurringItemId]: true },
           notes: '',
@@ -192,31 +207,34 @@ export const useExpenseTracker = (addToast) => {
       }
     });
 
-    // 2. Persist to SQLite DB
-    dbToggleMeal(dateStr, recurringItemId).catch(err => {
+    // 2. Persist to DB
+    dbToggleMeal(cleanDate, recurringItemId).catch(err => {
       console.error('Failed to sync meal toggle to DB:', err);
     });
   }, []);
 
   const setDayMealNotes = useCallback((dateStr, notes) => {
-    const monthKey = dateStr.slice(0, 7);
+    const cleanDate = normalizeDateStr(dateStr);
+    const monthKey = cleanDate.slice(0, 7);
     
     // 1. Optimistic UI update
     setMealTracker(prev => {
-      const existingIndex = prev.findIndex(entry => entry.date === dateStr);
+      const existingIndex = prev.findIndex(entry => normalizeDateStr(entry.date) === cleanDate);
       if (existingIndex >= 0) {
         const existing = prev[existingIndex];
         const updatedList = [...prev];
         updatedList[existingIndex] = {
           ...existing,
+          date: cleanDate,
+          month: monthKey,
           notes,
           updatedAt: new Date().toISOString(),
         };
         return updatedList;
       } else if (notes) {
         return [...prev, {
-          id: `meal-track-${dateStr}-${Date.now()}`,
-          date: dateStr,
+          id: `meal-track-${cleanDate}-${Date.now()}`,
+          date: cleanDate,
           month: monthKey,
           mealsMarked: {},
           notes,
@@ -227,8 +245,8 @@ export const useExpenseTracker = (addToast) => {
       return prev;
     });
 
-    // 2. Persist to SQLite DB
-    dbSaveMealNotes(dateStr, notes).catch(err => {
+    // 2. Persist to DB
+    dbSaveMealNotes(cleanDate, notes).catch(err => {
       console.error('Failed to sync notes to DB:', err);
     });
   }, []);

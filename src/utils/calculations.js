@@ -1,4 +1,4 @@
-import { parseMonthKey, getDaysInMonth, getCalendarGrid } from './dateHelpers';
+import { parseMonthKey, getDaysInMonth, getCalendarGrid, normalizeDateStr } from './dateHelpers';
 
 /**
  * Resolves the effective price for a recurring item on a specific date,
@@ -6,13 +6,14 @@ import { parseMonthKey, getDaysInMonth, getCalendarGrid } from './dateHelpers';
  */
 export const getItemPriceForDate = (item, dateStr) => {
   if (!item) return 0;
+  const cleanDate = normalizeDateStr(dateStr);
   
   if (Array.isArray(item.priceHistory) && item.priceHistory.length > 0) {
     // Sort descending by effectiveFrom
     const sorted = [...item.priceHistory].sort((a, b) => 
-      b.effectiveFrom.localeCompare(a.effectiveFrom)
+      normalizeDateStr(b.effectiveFrom).localeCompare(normalizeDateStr(a.effectiveFrom))
     );
-    const applicable = sorted.find(p => p.effectiveFrom <= dateStr);
+    const applicable = sorted.find(p => normalizeDateStr(p.effectiveFrom) <= cleanDate);
     if (applicable && typeof applicable.price === 'number') {
       return applicable.price;
     }
@@ -26,7 +27,8 @@ export const getItemPriceForDate = (item, dateStr) => {
  */
 export const isItemActiveOnDate = (item, dateStr) => {
   if (!item || item.isActive === false) return false;
-  if (item.endDate && dateStr > item.endDate) return false;
+  const cleanDate = normalizeDateStr(dateStr);
+  if (item.endDate && cleanDate > normalizeDateStr(item.endDate)) return false;
   return true;
 };
 
@@ -34,7 +36,8 @@ export const isItemActiveOnDate = (item, dateStr) => {
  * Calculates daily meal, miscellaneous, and overall totals for a single date.
  */
 export const calculateDailyTotals = (dateStr, mealTrackerEntries = [], expenses = [], recurringItems = []) => {
-  if (!dateStr) {
+  const cleanDate = normalizeDateStr(dateStr);
+  if (!cleanDate) {
     return {
       date: '',
       dailyMealTotal: 0,
@@ -52,7 +55,7 @@ export const calculateDailyTotals = (dateStr, mealTrackerEntries = [], expenses 
   const itemMap = new Map(recurringItems.map(item => [item.id, item]));
   
   // Find meal record for this date
-  const mealRecord = mealTrackerEntries.find(entry => entry.date === dateStr);
+  const mealRecord = mealTrackerEntries.find(entry => normalizeDateStr(entry.date) === cleanDate);
   let dailyMealTotal = 0;
   const markedItemsDetails = [];
   
@@ -60,8 +63,8 @@ export const calculateDailyTotals = (dateStr, mealTrackerEntries = [], expenses 
     for (const [itemId, isMarked] of Object.entries(mealRecord.mealsMarked)) {
       if (isMarked) {
         const item = itemMap.get(itemId);
-        if (item && isItemActiveOnDate(item, dateStr)) {
-          const price = getItemPriceForDate(item, dateStr);
+        if (item && isItemActiveOnDate(item, cleanDate)) {
+          const price = getItemPriceForDate(item, cleanDate);
           const isPaid = !!(mealRecord?.mealsPaid?.[item.id]?.paid || mealRecord?.mealsPaid?.[item.id] === true);
           dailyMealTotal += price;
           markedItemsDetails.push({
@@ -77,12 +80,12 @@ export const calculateDailyTotals = (dateStr, mealTrackerEntries = [], expenses 
   }
   
   // Calculate misc expenses for this date
-  const dayExpenses = expenses.filter(exp => exp.date === dateStr);
+  const dayExpenses = expenses.filter(exp => normalizeDateStr(exp.date) === cleanDate);
   const dailyMiscTotal = dayExpenses.reduce((sum, exp) => sum + (Number(exp.totalAmount) || 0), 0);
   const dailyOverallTotal = dailyMealTotal + dailyMiscTotal;
   
   return {
-    date: dateStr,
+    date: cleanDate,
     dailyMealTotal,
     dailyMiscTotal,
     dailyOverallTotal,
@@ -150,14 +153,20 @@ export const calculateMonthlyTotals = (monthKey, mealTrackerEntries = [], expens
   const curMonthStr = String(monthIndex + 1).padStart(2, '0');
   const monthPrefix = `${year}-${curMonthStr}`;
   
+  const targetMonthKey = String(monthKey || '').slice(0, 7);
+
   // Filter relevant records for the month
-  const monthMealEntries = mealTrackerEntries.filter(entry => 
-    entry.month === monthKey || (entry.date && entry.date.startsWith(monthPrefix))
-  );
+  const monthMealEntries = mealTrackerEntries.filter(entry => {
+    const entryDate = normalizeDateStr(entry.date);
+    const entryMonth = (entry.month && String(entry.month).slice(0, 7)) || entryDate.slice(0, 7);
+    return entryMonth === targetMonthKey || entryDate.startsWith(monthPrefix);
+  });
   
-  const monthExpenses = expenses.filter(exp => 
-    exp.month === monthKey || (exp.date && exp.date.startsWith(monthPrefix))
-  );
+  const monthExpenses = expenses.filter(exp => {
+    const expDate = normalizeDateStr(exp.date);
+    const expMonth = (exp.month && String(exp.month).slice(0, 7)) || expDate.slice(0, 7);
+    return expMonth === targetMonthKey || expDate.startsWith(monthPrefix);
+  });
   
   const itemMap = new Map(recurringItems.map(item => [item.id, item]));
   

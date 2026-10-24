@@ -45,9 +45,36 @@ export const getAdjacentMonthKey = (monthKey, offset) => {
   return `${targetYear}-${targetMonth}`;
 };
 
+export const normalizeDateStr = (dateVal) => {
+  if (!dateVal) return '';
+  if (dateVal instanceof Date) {
+    const y = dateVal.getFullYear();
+    const m = String(dateVal.getMonth() + 1).padStart(2, '0');
+    const d = String(dateVal.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(dateVal).trim();
+  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return s;
+};
+
 export const formatDateDisplay = (dateStr, format = 'medium') => {
   if (!dateStr) return '';
-  const [y, m, d] = dateStr.split('-').map(Number);
+  const clean = normalizeDateStr(dateStr);
+  const parts = clean.split('-').map(Number);
+  if (parts.length < 3 || isNaN(parts[0]) || isNaN(parts[1]) || isNaN(parts[2])) {
+    return clean;
+  }
+  const [y, m, d] = parts;
   const date = new Date(y, m - 1, d);
   if (format === 'short') {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -60,7 +87,12 @@ export const formatDateDisplay = (dateStr, format = 'medium') => {
 
 export const getDayOfWeekName = (dateStr) => {
   if (!dateStr) return '';
-  const [y, m, d] = dateStr.split('-').map(Number);
+  const clean = normalizeDateStr(dateStr);
+  const parts = clean.split('-').map(Number);
+  if (parts.length < 3 || isNaN(parts[0]) || isNaN(parts[1]) || isNaN(parts[2])) {
+    return '';
+  }
+  const [y, m, d] = parts;
   const date = new Date(y, m - 1, d);
   return date.toLocaleDateString('en-US', { weekday: 'long' });
 };
