@@ -406,24 +406,13 @@ export async function getAllData(userId) {
 
   if (!userId) throw new Error('userId required for getAllData');
 
-  // Automatically claim any unassigned or legacy records for this user so data is never hidden
-  const tables = ['recurring_items', 'meal_tracker', 'expenses', 'budgets', 'payments', 'settings'];
-  for (const tbl of tables) {
-    try {
-      await db.execute({
-        sql: `UPDATE ${tbl} SET user_id = ? WHERE user_id = ? OR user_id IS NULL OR user_id = ''`,
-        args: [userId, DEFAULT_USER_ID],
-      });
-    } catch (_) {}
-  }
-
   const [recRes, mealRes, expRes, budgetRes, setRes, payRes] = await Promise.all([
-    db.execute({ sql: 'SELECT * FROM recurring_items WHERE user_id = ? OR user_id IS NULL OR user_id = ?', args: [userId, DEFAULT_USER_ID] }),
-    db.execute({ sql: 'SELECT * FROM meal_tracker WHERE user_id = ? OR user_id IS NULL OR user_id = ? ORDER BY date ASC', args: [userId, DEFAULT_USER_ID] }),
-    db.execute({ sql: 'SELECT * FROM expenses WHERE user_id = ? OR user_id IS NULL OR user_id = ? ORDER BY date DESC', args: [userId, DEFAULT_USER_ID] }),
-    db.execute({ sql: 'SELECT * FROM budgets WHERE user_id = ? OR user_id IS NULL OR user_id = ?', args: [userId, DEFAULT_USER_ID] }),
-    db.execute({ sql: 'SELECT * FROM settings WHERE user_id = ? OR user_id IS NULL OR user_id = ?', args: [userId, DEFAULT_USER_ID] }),
-    db.execute({ sql: 'SELECT * FROM payments WHERE user_id = ? OR user_id IS NULL OR user_id = ? ORDER BY payment_date DESC, created_at DESC', args: [userId, DEFAULT_USER_ID] }),
+    db.execute({ sql: 'SELECT * FROM recurring_items WHERE user_id = ?', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM meal_tracker WHERE user_id = ? ORDER BY date ASC', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM budgets WHERE user_id = ?', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM settings WHERE user_id = ?', args: [userId] }),
+    db.execute({ sql: 'SELECT * FROM payments WHERE user_id = ? ORDER BY payment_date DESC, created_at DESC', args: [userId] }),
   ]);
 
   let recurringRows = recRes.rows;
@@ -543,31 +532,31 @@ export async function getYearlyData(userId, year) {
   const [expRes, mealRes, payRes, recRes] = await Promise.all([
     db.execute({
       sql: `SELECT * FROM expenses
-            WHERE (user_id = ? OR user_id IS NULL OR user_id = ?)
+            WHERE user_id = ?
               AND date >= ?
               AND date < ?
             ORDER BY date ASC`,
-      args: [userId, DEFAULT_USER_ID, startDate, startOfNextYear],
+      args: [userId, startDate, startOfNextYear],
     }),
     db.execute({
       sql: `SELECT * FROM meal_tracker
-            WHERE (user_id = ? OR user_id IS NULL OR user_id = ?)
+            WHERE user_id = ?
               AND date >= ?
               AND date < ?
             ORDER BY date ASC`,
-      args: [userId, DEFAULT_USER_ID, startDate, startOfNextYear],
+      args: [userId, startDate, startOfNextYear],
     }),
     db.execute({
       sql: `SELECT * FROM payments
-            WHERE (user_id = ? OR user_id IS NULL OR user_id = ?)
+            WHERE user_id = ?
               AND payment_date >= ?
               AND payment_date < ?
             ORDER BY payment_date ASC`,
-      args: [userId, DEFAULT_USER_ID, startDate, startOfNextYear],
+      args: [userId, startDate, startOfNextYear],
     }),
     db.execute({
-      sql: 'SELECT * FROM recurring_items WHERE user_id = ? OR user_id IS NULL OR user_id = ?',
-      args: [userId, DEFAULT_USER_ID],
+      sql: 'SELECT * FROM recurring_items WHERE user_id = ?',
+      args: [userId],
     }),
   ]);
 
