@@ -9,6 +9,7 @@ dist-ssr/
 build/
 out/
 .output/
+.agent/
 
 # Vercel Deployment Cache
 .vercel/
