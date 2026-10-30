@@ -223,8 +223,6 @@ export async function dbRunMaintenance() {
 
 export async function dbClearAll() {
   const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
-  const adminSecret = import.meta.env.VITE_ADMIN_SECRET;
-  if (adminSecret) headers['X-Admin-Secret'] = adminSecret;
 
   const res = await fetch(`${API_BASE}/clear`, {
     method: 'POST',

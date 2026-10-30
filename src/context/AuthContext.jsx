@@ -136,12 +136,14 @@ export function AuthProvider({ children }) {
    */
   const logout = useCallback(() => {
     persistAuth(null, null);
-    // Clear any offline cache to prevent cross-user leakage
+    // Clear all offline cached user data to prevent cross-user leakage
     try {
       const keysToRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key && key.startsWith('drachma_')) keysToRemove.push(key);
+        if (key && (key.startsWith('drachma_') || key.startsWith('expense_tracker_'))) {
+          keysToRemove.push(key);
+        }
       }
       keysToRemove.forEach((k) => localStorage.removeItem(k));
     } catch {}

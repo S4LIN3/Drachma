@@ -149,7 +149,7 @@ export const db = {
       const args = (stmt && stmt.args) || [];
       const pgSql = formatPgSql(sql);
       const res = await pgPool.query(pgSql, args);
-      return { rows: res.rows };
+      return { rows: res.rows, rowsAffected: res.rowCount };
     } else {
       return libsqlClient.execute(stmt);
     }
@@ -234,7 +234,8 @@ export async function initDatabase() {
             meals_paid TEXT DEFAULT '{}',
             created_at TEXT,
             updated_at TEXT,
-            user_id TEXT
+            user_id TEXT,
+            CONSTRAINT uq_meal_tracker_date_user UNIQUE (date, user_id)
           )`,
           `CREATE TABLE IF NOT EXISTS expenses (
             id TEXT PRIMARY KEY,
@@ -258,13 +259,15 @@ export async function initDatabase() {
             amount DOUBLE PRECISION NOT NULL,
             created_at TEXT,
             updated_at TEXT,
-            user_id TEXT
+            user_id TEXT,
+            CONSTRAINT uq_budgets_month_category_user UNIQUE (month, category, user_id)
           )`,
           `CREATE TABLE IF NOT EXISTS settings (
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             updated_at TEXT,
-            user_id TEXT
+            user_id TEXT,
+            CONSTRAINT uq_settings_key_user UNIQUE (key, user_id)
           )`,
           `CREATE TABLE IF NOT EXISTS payments (
             id TEXT PRIMARY KEY,
@@ -612,7 +615,7 @@ export async function getYearlyData(userId, year) {
 /**
  * Database Maintenance Routine
  */
-export async function runDatabaseMaintenance() {
+export async function runDatabaseMaintenance(userId = null) {
   await initDatabase();
 
   const results = {
@@ -624,23 +627,41 @@ export async function runDatabaseMaintenance() {
   };
 
   try {
-    const [recC, mealC, expC, bgtC, payC, usrC] = await Promise.all([
-      db.execute('SELECT COUNT(*) as count FROM recurring_items'),
-      db.execute('SELECT COUNT(*) as count FROM meal_tracker'),
-      db.execute('SELECT COUNT(*) as count FROM expenses'),
-      db.execute('SELECT COUNT(*) as count FROM budgets'),
-      db.execute('SELECT COUNT(*) as count FROM payments'),
-      db.execute('SELECT COUNT(*) as count FROM users'),
-    ]);
+    if (userId) {
+      const [recC, mealC, expC, bgtC, payC] = await Promise.all([
+        db.execute({ sql: 'SELECT COUNT(*) as count FROM recurring_items WHERE user_id = ?', args: [userId] }),
+        db.execute({ sql: 'SELECT COUNT(*) as count FROM meal_tracker WHERE user_id = ?', args: [userId] }),
+        db.execute({ sql: 'SELECT COUNT(*) as count FROM expenses WHERE user_id = ?', args: [userId] }),
+        db.execute({ sql: 'SELECT COUNT(*) as count FROM budgets WHERE user_id = ?', args: [userId] }),
+        db.execute({ sql: 'SELECT COUNT(*) as count FROM payments WHERE user_id = ?', args: [userId] }),
+      ]);
 
-    results.recordsCount = {
-      users: Number(usrC.rows[0]?.count || 0),
-      recurringItems: Number(recC.rows[0]?.count || 0),
-      mealTrackerDays: Number(mealC.rows[0]?.count || 0),
-      expenses: Number(expC.rows[0]?.count || 0),
-      budgets: Number(bgtC.rows[0]?.count || 0),
-      payments: Number(payC.rows[0]?.count || 0),
-    };
+      results.recordsCount = {
+        recurringItems: Number(recC.rows[0]?.count || 0),
+        mealTrackerDays: Number(mealC.rows[0]?.count || 0),
+        expenses: Number(expC.rows[0]?.count || 0),
+        budgets: Number(bgtC.rows[0]?.count || 0),
+        payments: Number(payC.rows[0]?.count || 0),
+      };
+    } else {
+      const [recC, mealC, expC, bgtC, payC, usrC] = await Promise.all([
+        db.execute('SELECT COUNT(*) as count FROM recurring_items'),
+        db.execute('SELECT COUNT(*) as count FROM meal_tracker'),
+        db.execute('SELECT COUNT(*) as count FROM expenses'),
+        db.execute('SELECT COUNT(*) as count FROM budgets'),
+        db.execute('SELECT COUNT(*) as count FROM payments'),
+        db.execute('SELECT COUNT(*) as count FROM users'),
+      ]);
+
+      results.recordsCount = {
+        users: Number(usrC.rows[0]?.count || 0),
+        recurringItems: Number(recC.rows[0]?.count || 0),
+        mealTrackerDays: Number(mealC.rows[0]?.count || 0),
+        expenses: Number(expC.rows[0]?.count || 0),
+        budgets: Number(bgtC.rows[0]?.count || 0),
+        payments: Number(payC.rows[0]?.count || 0),
+      };
+    }
   } catch (err) {
     console.error('Maintenance routine warning:', err);
     results.error = err.message;

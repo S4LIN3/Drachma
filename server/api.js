@@ -35,26 +35,46 @@ function sendJson(res, statusCode, data) {
 function applyCorsHeaders(req, res) {
   const origin = req.headers['origin'];
   const allowedOrigin = process.env.ALLOWED_ORIGIN;
+  const host = req.headers['host'];
 
-  if (allowedOrigin) {
-    if (origin === allowedOrigin) {
-      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+  if (origin) {
+    let isAllowed = false;
+    if (allowedOrigin) {
+      isAllowed = origin === allowedOrigin;
+    } else {
+      // In development or when ALLOWED_ORIGIN is not set, allow same host or localhost
+      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+      const isSameHost = host && (origin === `http://${host}` || origin === `https://${host}`);
+      if (isLocalhost || isSameHost) {
+        isAllowed = true;
+      }
     }
-  } else if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+
+    if (isAllowed) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, X-Admin-Secret');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key');
   res.setHeader('Access-Control-Max-Age', '86400');
+}
+
+function getClientIp(req) {
+  if (req.ip) return req.ip;
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded && typeof forwarded === 'string') {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || '127.0.0.1';
 }
 
 // Dual-Tier In-Memory Rate Limiter (Reads: 120/min, Writes: 35/min per IP)
 const rateLimitMap = new Map();
 
 function checkRateLimit(req, isWriteOperation = false) {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '127.0.0.1';
+  const ip = getClientIp(req);
   const now = Date.now();
   const windowMs = 60 * 1000;
   const maxRequests = isWriteOperation ? 35 : 120;
@@ -222,8 +242,8 @@ export async function handleApiRequest(req, res, next) {
 
       if (!name) return sendJson(res, 400, { success: false, error: 'Name is required' });
       if (!isValidEmail(email)) return sendJson(res, 400, { success: false, error: 'Valid email is required' });
-      if (!password || password.length < 8) {
-        return sendJson(res, 400, { success: false, error: 'Password must be at least 8 characters' });
+      if (!password || password.length < 8 || password.length > 128) {
+        return sendJson(res, 400, { success: false, error: 'Password must be between 8 and 128 characters' });
       }
 
       // Check duplicate email (case-insensitive)
@@ -368,7 +388,7 @@ export async function handleApiRequest(req, res, next) {
 
   // POST /auth/login
   if (path === '/auth/login' && method === 'POST') {
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '127.0.0.1';
+    const clientIp = getClientIp(req);
 
     if (checkLoginRateLimit(clientIp)) {
       return sendJson(res, 429, {
@@ -523,8 +543,8 @@ export async function handleApiRequest(req, res, next) {
       }
 
       if (body.currentPassword && body.newPassword) {
-        if (body.newPassword.length < 8) {
-          return sendJson(res, 400, { success: false, error: 'New password must be at least 8 characters' });
+        if (body.newPassword.length < 8 || body.newPassword.length > 128) {
+          return sendJson(res, 400, { success: false, error: 'New password must be between 8 and 128 characters' });
         }
         const userRes = await db.execute({ sql: 'SELECT password_hash FROM users WHERE id = ?', args: [userId] });
         const valid = await verifyPassword(body.currentPassword, String(userRes.rows[0]?.password_hash));
@@ -901,7 +921,13 @@ export async function handleApiRequest(req, res, next) {
       const description = sanitizeInput(body.description, 300);
       const category = sanitizeInput(body.category, 50) || 'other';
       const notes = sanitizeInput(body.notes, 1000);
-      const attachment = typeof body.attachment === 'string' ? body.attachment.slice(0, 500000) : '';
+      let attachment = '';
+      if (typeof body.attachment === 'string' && body.attachment.length <= 500000) {
+        const trimmedAtt = body.attachment.trim();
+        if (/^data:image\/(png|jpe?g|webp|gif|svg\+xml);base64,/i.test(trimmedAtt) || /^https?:\/\//i.test(trimmedAtt)) {
+          attachment = trimmedAtt;
+        }
+      }
 
       if (!isValidDate(date) || !description) {
         return sendJson(res, 400, { success: false, error: 'Valid date (YYYY-MM-DD) and description required' });
@@ -1093,7 +1119,7 @@ export async function handleApiRequest(req, res, next) {
       await db.execute({
         sql: `INSERT INTO budgets (id, month, category, amount, created_at, updated_at, user_id)
               VALUES (?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(month, category) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at`,
+              ON CONFLICT(month, category, user_id) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at`,
         args: [budgetId, month, category, amount, now, now, userId],
       });
 
@@ -1168,12 +1194,6 @@ export async function handleApiRequest(req, res, next) {
   if (path === '/clear' && method === 'POST') {
     try {
       const body = await parseJsonBody(req);
-      const adminSecret = process.env.ADMIN_SECRET;
-
-      if (adminSecret && req.headers['x-admin-secret'] !== adminSecret) {
-        return sendJson(res, 403, { success: false, error: 'Forbidden: Invalid Admin Secret' });
-      }
-
       if (body.confirm !== true) {
         return sendJson(res, 400, { success: false, error: 'Data clear confirmation required' });
       }
@@ -1333,7 +1353,7 @@ export async function handleApiRequest(req, res, next) {
   // POST /maintenance
   if (path === '/maintenance' && method === 'POST') {
     try {
-      const results = await runDatabaseMaintenance();
+      const results = await runDatabaseMaintenance(userId);
       broadcastEvent(userId, 'MAINTENANCE_COMPLETED', results);
       return sendJson(res, 200, { success: true, data: results });
     } catch (err) {

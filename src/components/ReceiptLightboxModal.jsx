@@ -4,7 +4,15 @@ import { X, Download, ExternalLink } from 'lucide-react';
 export const ReceiptLightboxModal = ({ isOpen, imageSrc, title = 'Receipt Attachment', onClose }) => {
   if (!isOpen || !imageSrc) return null;
 
+  const isSafeDataUri = typeof imageSrc === 'string' && /^data:image\/(png|jpe?g|webp|gif|svg\+xml);base64,/i.test(imageSrc.trim());
+  const isSafeHttpUri = typeof imageSrc === 'string' && /^https?:\/\//i.test(imageSrc.trim());
+  const isSafeImage = isSafeDataUri || isSafeHttpUri;
+
   const handleDownload = () => {
+    if (!isSafeImage) {
+      console.warn('Blocked download of untrusted image source scheme');
+      return;
+    }
     const a = document.createElement('a');
     a.href = imageSrc;
     a.download = `receipt_${Date.now()}.png`;
